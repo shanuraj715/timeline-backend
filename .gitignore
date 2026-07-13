@@ -1,0 +1,26 @@
+# dependencies
+node_modules/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# storage (local media root)
+storage/originals/
+storage/thumbnails/
+storage/previews/
+!storage/.gitkeep
+
+# logs
+*.log
+npm-debug.log*
+
+# os
+.DS_Store
+Thumbs.db
+
+# editor
+.vscode/*
+!.vscode/extensions.json
+.idea/
