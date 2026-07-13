@@ -3,6 +3,7 @@ import express from "express";
 import cookieParser from "cookie-parser";
 import { authRouter } from "./routes/auth.js";
 import { adminRouter } from "./routes/admin.js";
+import { timelinesRouter } from "./routes/timelines.js";
 import { serverError } from "./lib/apiError.js";
 
 const PORT = process.env.PORT || 4000;
@@ -30,6 +31,7 @@ app.get("/api/health", (req, res) => {
 
 app.use("/api/auth", authRouter);
 app.use("/api/admin", adminRouter);
+app.use("/api/timelines", timelinesRouter);
 
 // Catches anything forwarded via asyncHandler's `.catch(next)` from any
 // route that didn't already handle its own errors — the equivalent of the
