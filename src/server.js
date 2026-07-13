@@ -5,6 +5,7 @@ import { authRouter } from "./routes/auth.js";
 import { adminRouter } from "./routes/admin.js";
 import { timelinesRouter } from "./routes/timelines.js";
 import { invitationsRouter } from "./routes/invitations.js";
+import { mediaRouter } from "./routes/media.js";
 import { serverError } from "./lib/apiError.js";
 
 const PORT = process.env.PORT || 4000;
@@ -34,6 +35,7 @@ app.use("/api/auth", authRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/timelines", timelinesRouter);
 app.use("/api/invitations", invitationsRouter);
+app.use("/api/media", mediaRouter);
 
 // Catches anything forwarded via asyncHandler's `.catch(next)` from any
 // route that didn't already handle its own errors — the equivalent of the

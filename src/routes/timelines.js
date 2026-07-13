@@ -1,4 +1,7 @@
 import { Router } from "express";
+import multer from "multer";
+import mongoose from "mongoose";
+import { ZodError } from "zod";
 import { customAlphabet } from "nanoid";
 import { connectDB } from "../lib/db/connect.js";
 import Timeline from "../models/Timeline.js";
@@ -9,7 +12,8 @@ import Invitation from "../models/Invitation.js";
 import User from "../models/User.js";
 import ActivityLog from "../models/ActivityLog.js";
 import { createTimelineSchema, updateTimelineSchema, inviteMemberSchema, updateMemberRoleSchema } from "../lib/validation/timeline.js";
-import { parseJson, serverError, badRequest } from "../lib/apiError.js";
+import { searchMediaSchema } from "../lib/validation/media.js";
+import { parseJson, serverError, badRequest, fromZodError } from "../lib/apiError.js";
 import {
   getCurrentUser,
   unauthorized,
@@ -26,8 +30,20 @@ import { signMediaToken } from "../lib/auth/mediaToken.js";
 import { serializeMedia } from "../lib/media/serialize.js";
 import { canAssignRole } from "../lib/rbac/permissions.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
+import { validateMediaFile } from "../lib/media/fileValidation.js";
+import { computeChecksum } from "../lib/media/checksum.js";
+import { extractImageExif } from "../lib/media/exif.js";
+import { generateImageDerivatives } from "../lib/media/thumbnail.js";
+import { dayKeyFor } from "../lib/media/dayKey.js";
+import { syncDaySummary } from "../lib/media/daySummary.js";
+import { storage, buildStorageKey } from "../lib/storage/index.js";
 
 export const timelinesRouter = Router();
+
+const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_SIZE_MB || 500) * 1024 * 1024;
+// Generous headroom over a single file's limit for a multi-file batch request.
+const MAX_BATCH_BYTES = MAX_UPLOAD_BYTES * 10;
+const upload = multer({ storage: multer.memoryStorage() });
 
 const tokenId = customAlphabet("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 32);
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -712,5 +728,408 @@ timelinesRouter.delete(
     } catch (err) {
       serverError(res, err, "Failed to revoke invitation");
     }
+  })
+);
+
+/** Flat, paginated media listing (newest first) for the dashboard's Media Library / Upload Manager view. */
+timelinesRouter.get(
+  "/:slug/media",
+  asyncHandler(async (req, res) => {
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("viewTimeline", membership, res)) return;
+
+    const status = req.query.status; // pending | processing | ready | failed | undefined (all)
+
+    const query = { timelineId: timeline._id, deletedAt: null };
+    if (status) query.processingStatus = status;
+
+    // Page-number pagination (not the cursor style the rest of this route
+    // used to use) — the Media Library tab needs to jump directly to an
+    // arbitrary page, which a cursor can't do.
+    const pageParam = req.query.page;
+    if (pageParam !== undefined) {
+      const limit = Math.min(Number(req.query.limit) || 60, 100);
+      const page = Math.max(Number(pageParam) || 1, 1);
+
+      try {
+        const [items, total] = await Promise.all([
+          Media.find(query)
+            .sort({ createdAt: -1 })
+            .skip((page - 1) * limit)
+            .limit(limit),
+          Media.countDocuments(query),
+        ]);
+
+        return res.json({
+          media: items.map((item) =>
+            serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user._id }))
+          ),
+          page,
+          pageCount: Math.max(Math.ceil(total / limit), 1),
+          total,
+        });
+      } catch (err) {
+        return serverError(res, err, "Failed to load media library");
+      }
+    }
+
+    // Legacy cursor mode, kept for any other caller of this route.
+    const cursor = req.query.cursor;
+    const limit = Math.min(Number(req.query.limit) || 60, 100);
+    if (cursor) query.createdAt = { $lt: new Date(cursor) };
+
+    try {
+      const items = await Media.find(query).sort({ createdAt: -1 }).limit(limit + 1);
+      const hasMore = items.length > limit;
+      const cursorPage = hasMore ? items.slice(0, limit) : items;
+
+      res.json({
+        media: cursorPage.map((item) =>
+          serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user._id }))
+        ),
+        hasMore,
+        nextCursor: hasMore ? cursorPage[cursorPage.length - 1].createdAt.toISOString() : null,
+      });
+    } catch (err) {
+      serverError(res, err, "Failed to load media library");
+    }
+  })
+);
+
+function checkBatchContentLength(req, res, next) {
+  // Reject oversized requests by their declared Content-Length before
+  // multer buffers the whole multipart body into memory — the per-file size
+  // check inside processOneUpload runs too late to prevent that. (A reverse
+  // proxy in front of this app should enforce its own body-size cap too —
+  // see README — since Content-Length can be omitted or spoofed.)
+  const declaredLength = Number(req.headers["content-length"] || 0);
+  if (declaredLength > MAX_BATCH_BYTES) {
+    return res.status(413).json({ error: "Upload batch is too large", code: "PAYLOAD_TOO_LARGE" });
+  }
+  next();
+}
+
+timelinesRouter.post(
+  "/:slug/media",
+  checkBatchContentLength,
+  upload.array("files"),
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("uploadMedia", membership, res)) return;
+    if (membership.role === "editor" && !timeline.settings.allowMemberUploads) {
+      return forbidden(res, "The timeline owner has disabled uploads from editors");
+    }
+
+    const files = req.files || [];
+    if (files.length === 0) return badRequest(res, "No files were provided");
+
+    let clientDates = [];
+    try {
+      clientDates = JSON.parse(req.body.clientDates || "[]");
+    } catch {
+      clientDates = [];
+    }
+
+    const ip = clientIp(req);
+    const results = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      results.push(
+        await processOneUpload({
+          file,
+          clientDate: clientDates[i],
+          timeline,
+          userId: user._id,
+          ip,
+        })
+      );
+    }
+
+    res.status(201).json({ results });
+  })
+);
+
+async function processOneUpload({ file, clientDate, timeline, userId, ip }) {
+  const filename = file.originalname || "upload";
+
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return { filename, status: "failed", error: `File exceeds the ${MAX_UPLOAD_BYTES / 1024 / 1024}MB limit` };
+  }
+
+  const buffer = file.buffer;
+
+  const validation = await validateMediaFile(buffer);
+  if (!validation.valid) {
+    return { filename, status: "failed", error: validation.reason };
+  }
+
+  const checksum = computeChecksum(buffer);
+  const duplicate = await Media.findOne({ timelineId: timeline._id, checksum, deletedAt: null });
+  if (duplicate) {
+    return { filename, status: "duplicate", mediaId: duplicate._id.toString() };
+  }
+
+  let captureDate = null;
+  let captureDateSource = "upload";
+
+  if (validation.type === "image") {
+    const exif = await extractImageExif(buffer);
+    if (exif.captureDate) {
+      captureDate = exif.captureDate;
+      captureDateSource = "exif";
+    }
+  }
+  if (!captureDate && clientDate) {
+    const parsed = new Date(clientDate);
+    if (!Number.isNaN(parsed.getTime())) {
+      captureDate = parsed;
+      captureDateSource = "manual";
+    }
+  }
+  if (!captureDate) captureDate = new Date();
+
+  const dayKey = dayKeyFor(captureDate);
+  const mediaId = new mongoose.Types.ObjectId();
+
+  const originalKey = buildStorageKey({
+    timelineId: timeline._id,
+    dayKey,
+    mediaId,
+    extension: validation.extension,
+    variant: "original",
+  });
+  await storage.write(originalKey, buffer);
+
+  const baseDoc = {
+    _id: mediaId,
+    timelineId: timeline._id,
+    uploaderId: userId,
+    type: validation.type,
+    storageKey: originalKey,
+    checksum,
+    mimeType: validation.mime,
+    originalFilename: filename,
+    size: file.size,
+    captureDate,
+    captureDateSource,
+    dayKey,
+  };
+
+  let media;
+
+  if (validation.type === "image") {
+    try {
+      const { width, height, thumbnailBuffer, previewBuffer } = await generateImageDerivatives(buffer);
+
+      const thumbnailKey = buildStorageKey({
+        timelineId: timeline._id,
+        dayKey,
+        mediaId,
+        extension: ".webp",
+        variant: "thumbnail",
+      });
+      const previewKey = buildStorageKey({
+        timelineId: timeline._id,
+        dayKey,
+        mediaId,
+        extension: ".webp",
+        variant: "preview",
+      });
+      await Promise.all([
+        storage.write(thumbnailKey, thumbnailBuffer),
+        storage.write(previewKey, previewBuffer),
+      ]);
+
+      media = await Media.create({
+        ...baseDoc,
+        width,
+        height,
+        thumbnailKey,
+        previewKey,
+        processingStatus: "ready",
+      });
+    } catch (err) {
+      media = await Media.create({
+        ...baseDoc,
+        processingStatus: "failed",
+        processingError: "Could not generate a thumbnail for this image",
+        processingAttempts: 1,
+        lastAttemptAt: new Date(),
+      });
+      console.error("Image processing failed:", err);
+    }
+  } else {
+    // Video thumbnailing is deferred to the background worker (scripts/worker.js).
+    media = await Media.create({ ...baseDoc, processingStatus: "pending" });
+  }
+
+  if (media.processingStatus === "ready") {
+    await syncDaySummary(timeline._id, dayKey);
+  }
+
+  await logActivity({
+    userId,
+    timelineId: timeline._id,
+    action: "media_uploaded",
+    targetType: "media",
+    targetId: media._id,
+    metadata: { type: validation.type, filename },
+    ip,
+  });
+
+  const token = signMediaToken({ mediaId: media._id, timelineId: timeline._id, userId });
+
+  return {
+    filename,
+    status: media.processingStatus,
+    mediaId: media._id.toString(),
+    dayKey,
+    token,
+  };
+}
+
+timelinesRouter.get(
+  "/:slug/media/search",
+  asyncHandler(async (req, res) => {
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("search", membership, res)) return;
+
+    const raw = {
+      q: req.query.q || undefined,
+      year: req.query.year || undefined,
+      month: req.query.month || undefined,
+      tags: req.query.tags ? req.query.tags.split(",").filter(Boolean) : undefined,
+      people: req.query.people ? req.query.people.split(",").filter(Boolean) : undefined,
+      location: req.query.location || undefined,
+      favorite: req.query.favorite !== undefined ? req.query.favorite === "true" : undefined,
+      type: req.query.type || undefined,
+      dateFrom: req.query.dateFrom || undefined,
+      dateTo: req.query.dateTo || undefined,
+      cursor: req.query.cursor || undefined,
+      limit: req.query.limit || undefined,
+    };
+
+    let data;
+    try {
+      data = searchMediaSchema.parse(raw);
+    } catch (err) {
+      if (err instanceof ZodError) return fromZodError(res, err);
+      throw err;
+    }
+
+    const query = {
+      timelineId: timeline._id,
+      deletedAt: null,
+      processingStatus: "ready",
+    };
+
+    if (data.q) query.$text = { $search: data.q };
+    if (data.type) query.type = data.type;
+    if (data.favorite !== undefined) query.favorite = data.favorite;
+    if (data.tags?.length) query.tags = { $in: data.tags };
+    if (data.people?.length) query.people = { $in: data.people };
+    if (data.location) query["location.name"] = { $regex: escapeRegex(data.location), $options: "i" };
+
+    const dateConditions = {};
+    if (data.year) {
+      const start = new Date(Date.UTC(data.year, 0, 1));
+      const end = new Date(Date.UTC(data.year + 1, 0, 1));
+      dateConditions.$gte = start;
+      dateConditions.$lt = end;
+    }
+    if (data.dateFrom) dateConditions.$gte = data.dateFrom;
+    if (data.dateTo) dateConditions.$lte = data.dateTo;
+    if (Object.keys(dateConditions).length) query.captureDate = dateConditions;
+
+    if (data.month) query.$expr = { $eq: [{ $month: "$captureDate" }, data.month] };
+
+    if (data.cursor) {
+      const cursorDate = new Date(data.cursor);
+      if (Number.isNaN(cursorDate.getTime())) return badRequest(res, "Invalid cursor");
+      query.captureDate = { ...(query.captureDate || {}), $lt: cursorDate };
+    }
+
+    const projection = data.q ? { score: { $meta: "textScore" } } : {};
+    const sort = data.q ? { score: { $meta: "textScore" }, captureDate: -1 } : { captureDate: -1 };
+
+    const results = await Media.find(query, projection)
+      .sort(sort)
+      .limit(data.limit + 1)
+      .lean();
+
+    const hasMore = results.length > data.limit;
+    const page = hasMore ? results.slice(0, data.limit) : results;
+
+    res.json({
+      results: page.map((item) =>
+        serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user._id }))
+      ),
+      hasMore,
+      nextCursor: hasMore ? page[page.length - 1].captureDate.toISOString() : null,
+    });
+  })
+);
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+timelinesRouter.get(
+  "/:slug/trash",
+  asyncHandler(async (req, res) => {
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("uploadMedia", membership, res)) return; // editor+ manage trash
+
+    const limit = Math.min(Number(req.query.limit) || 60, 100);
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const query = { timelineId: timeline._id, deletedAt: { $ne: null } };
+
+    const [items, total] = await Promise.all([
+      Media.find(query)
+        .sort({ deletedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit),
+      Media.countDocuments(query),
+    ]);
+
+    res.json({
+      media: items.map((item) =>
+        serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user._id }))
+      ),
+      page,
+      pageCount: Math.max(Math.ceil(total / limit), 1),
+      total,
+    });
   })
 );
