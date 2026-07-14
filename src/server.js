@@ -14,6 +14,7 @@ import { analyticsRouter } from "./routes/analytics.js";
 import { themesRouter } from "./routes/themes.js";
 import { settingsRouter } from "./routes/settings.js";
 import { couponsRouter } from "./routes/coupons.js";
+import { recaptchaRouter, publicRecaptchaRouter } from "./routes/recaptcha.js";
 import { serverError } from "./lib/apiError.js";
 
 const PORT = process.env.PORT || 4000;
@@ -57,10 +58,12 @@ app.use("/api/analytics", analyticsRouter);
 app.use("/api/themes", themesRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/coupons", couponsRouter);
+app.use("/api/recaptcha", recaptchaRouter);
 app.use("/api/public", publicCmsRouter);
 app.use("/api/public/feature-flags", publicFeatureFlagsRouter);
 app.use("/api/public/pricing", publicPricingRouter);
 app.use("/api/public/payment-gateways", publicPaymentsRouter);
+app.use("/api/public/recaptcha", publicRecaptchaRouter);
 
 // Catches anything forwarded via asyncHandler's `.catch(next)` from any
 // route that didn't already handle its own errors — the equivalent of the
