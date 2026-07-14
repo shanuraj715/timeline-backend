@@ -13,7 +13,12 @@ import { asyncHandler } from "../lib/asyncHandler.js";
 import { isFeatureEnabled } from "../lib/featureFlags.js";
 import { encryptSecret, decryptSecret, maskSecret, MASK_PREFIX } from "../lib/crypto.js";
 import { createMockOrder } from "../lib/payments/mock.js";
-import { createRazorpayOrder, verifyPaymentSignature, verifyWebhookSignature } from "../lib/payments/razorpay.js";
+import {
+  createRazorpayOrder,
+  verifyPaymentSignature,
+  verifyWebhookSignature,
+  describeRazorpayError,
+} from "../lib/payments/razorpay.js";
 import Coupon from "../models/Coupon.js";
 import { resolveCoupon, computeDiscount } from "./coupons.js";
 
@@ -225,6 +230,19 @@ paymentsRouter.post(
     } catch (err) {
       order.status = "failed";
       await order.save();
+
+      // A rejection from the gateway itself (almost always a bad/mismatched
+      // API key+secret pair) is the merchant's config problem, not ours —
+      // surface the real reason and point back at where to fix it instead
+      // of a generic 500 that gives the admin nothing to go on.
+      const gatewayReason = describeRazorpayError(err);
+      if (gatewayReason) {
+        return badRequest(
+          res,
+          `The payment gateway rejected this request: ${gatewayReason}. Check the API key and secret under Payment gateways in the admin panel.`
+        );
+      }
+
       serverError(res, err, "Failed to start checkout");
     }
   })

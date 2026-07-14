@@ -17,6 +17,22 @@ export async function createRazorpayOrder({ credentials, amount, currency, recei
   return { gatewayOrderId: order.id, amount: order.amount, currency: order.currency };
 }
 
+/**
+ * Razorpay SDK errors are plain objects, not Error instances — they come
+ * back shaped like { statusCode, error: { code, description } } with no
+ * .message at all. Passed straight to a generic 500 handler, that reason
+ * (almost always a bad/mismatched API key or secret) gets silently
+ * discarded and reported identically to an actual server bug. Returns the
+ * human-readable description when the error looks like this shape, or
+ * null otherwise so the caller can fall back to a generic error.
+ */
+export function describeRazorpayError(err) {
+  if (err && typeof err === "object" && typeof err.error?.description === "string") {
+    return err.error.description;
+  }
+  return null;
+}
+
 /** Verifies the signature Razorpay's Checkout widget returns after a successful payment. */
 export function verifyPaymentSignature({ keySecret, razorpayOrderId, razorpayPaymentId, razorpaySignature }) {
   const expected = crypto

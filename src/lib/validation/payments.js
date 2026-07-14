@@ -6,8 +6,12 @@ export const upsertGatewaySchema = z.object({
   mode: z.enum(["test", "live"]).default("test"),
   // Provider-specific: Razorpay -> { keyId, keySecret, webhookSecret }, UPI -> { vpa }, etc.
   // Values here are plain on the wire; the route layer encrypts anything
-  // secret-shaped before it touches the database.
-  credentials: z.record(z.string(), z.string()).default({}),
+  // secret-shaped before it touches the database. Trimmed because a
+  // leading/trailing space or newline from copy-pasting a key out of a
+  // gateway dashboard is a real, easy-to-make mistake that silently turns
+  // into "authentication failed" at checkout time with nothing in the UI
+  // to suggest why.
+  credentials: z.record(z.string(), z.string().trim()).default({}),
   config: z.record(z.string(), z.unknown()).default({}),
 });
 
