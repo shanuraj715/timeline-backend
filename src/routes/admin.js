@@ -7,11 +7,13 @@ import Membership from "../models/Membership.js";
 import Media from "../models/Media.js";
 import ActivityLog from "../models/ActivityLog.js";
 import { requireSuperAdmin, notFound, clientIp } from "../lib/auth/guards.js";
-import { parseJson, badRequest } from "../lib/apiError.js";
+import { parseJson, badRequest, serverError } from "../lib/apiError.js";
 import { revokeAllSessionsForUser } from "../lib/auth/session.js";
 import { logSecurityEvent } from "../lib/logger.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
+import { getPlatformSettings } from "../lib/platformSettings.js";
+import { getTimelineUsedBytes } from "../lib/storageQuota.js";
 
 export const adminRouter = Router();
 
@@ -155,6 +157,57 @@ adminRouter.post(
   })
 );
 
+// Deliberately anonymized: no title, slug, description, cover image, or
+// owner identity — just enough structural metadata (role, size, activity)
+// for support/moderation without exposing what's actually in someone's
+// private photo timeline or being able to find/open it. The full-detail
+// /timelines list above is a different, broader-scoped view.
+adminRouter.get(
+  "/users/:id/timelines",
+  asyncHandler(async (req, res) => {
+    const admin = await requireSuperAdmin(req, res);
+    if (!admin) return;
+
+    const { id } = req.params;
+    await connectDB();
+
+    const target = await User.findById(id);
+    if (!target) return notFound(res, "User not found");
+
+    const memberships = await Membership.find({ userId: id, status: "active" }).lean();
+    const timelineIds = memberships.map((m) => m.timelineId);
+    const roleByTimeline = new Map(memberships.map((m) => [m.timelineId.toString(), m.role]));
+
+    const timelines = await Timeline.find({ _id: { $in: timelineIds }, deletedAt: null })
+      .select("_id purchasedStorageBytes createdAt updatedAt")
+      .lean();
+
+    const ids = timelines.map((t) => t._id);
+    const [memberCounts, mediaCounts, storageBytes, settings] = await Promise.all([
+      Membership.aggregate([{ $match: { timelineId: { $in: ids }, status: "active" } }, { $group: { _id: "$timelineId", count: { $sum: 1 } } }]),
+      Media.aggregate([{ $match: { timelineId: { $in: ids }, deletedAt: null } }, { $group: { _id: "$timelineId", count: { $sum: 1 } } }]),
+      Media.aggregate([{ $match: { timelineId: { $in: ids }, deletedAt: null } }, { $group: { _id: "$timelineId", total: { $sum: "$size" } } }]),
+      getPlatformSettings(),
+    ]);
+    const memberByTimeline = new Map(memberCounts.map((m) => [m._id.toString(), m.count]));
+    const mediaByTimeline = new Map(mediaCounts.map((m) => [m._id.toString(), m.count]));
+    const usedByTimeline = new Map(storageBytes.map((s) => [s._id.toString(), s.total]));
+
+    res.json({
+      timelines: timelines.map((t) => ({
+        id: t._id.toString(),
+        role: roleByTimeline.get(t._id.toString()) || "unknown",
+        memberCount: memberByTimeline.get(t._id.toString()) || 0,
+        mediaCount: mediaByTimeline.get(t._id.toString()) || 0,
+        usedBytes: usedByTimeline.get(t._id.toString()) || 0,
+        quotaBytes: settings.freeStorageBytesPerTimeline + (t.purchasedStorageBytes || 0),
+        createdAt: t.createdAt,
+        updatedAt: t.updatedAt,
+      })),
+    });
+  })
+);
+
 adminRouter.get(
   "/timelines",
   asyncHandler(async (req, res) => {
@@ -169,12 +222,15 @@ adminRouter.get(
     const timelines = await Timeline.find(query).sort({ createdAt: -1 }).limit(limit).populate("ownerId", "name email");
 
     const ids = timelines.map((t) => t._id);
-    const [memberCounts, mediaCounts] = await Promise.all([
+    const [memberCounts, mediaCounts, storageBytes, settings] = await Promise.all([
       Membership.aggregate([{ $match: { timelineId: { $in: ids }, status: "active" } }, { $group: { _id: "$timelineId", count: { $sum: 1 } } }]),
       Media.aggregate([{ $match: { timelineId: { $in: ids }, deletedAt: null } }, { $group: { _id: "$timelineId", count: { $sum: 1 } } }]),
+      Media.aggregate([{ $match: { timelineId: { $in: ids }, deletedAt: null } }, { $group: { _id: "$timelineId", total: { $sum: "$size" } } }]),
+      getPlatformSettings(),
     ]);
     const memberByTimeline = new Map(memberCounts.map((m) => [m._id.toString(), m.count]));
     const mediaByTimeline = new Map(mediaCounts.map((m) => [m._id.toString(), m.count]));
+    const usedByTimeline = new Map(storageBytes.map((s) => [s._id.toString(), s.total]));
 
     res.json({
       timelines: timelines.map((t) => ({
@@ -184,9 +240,61 @@ adminRouter.get(
         owner: t.ownerId ? { name: t.ownerId.name, email: t.ownerId.email } : null,
         memberCount: memberByTimeline.get(t._id.toString()) || 0,
         mediaCount: mediaByTimeline.get(t._id.toString()) || 0,
+        usedBytes: usedByTimeline.get(t._id.toString()) || 0,
+        quotaBytes: settings.freeStorageBytesPerTimeline + (t.purchasedStorageBytes || 0),
         createdAt: t.createdAt,
       })),
     });
+  })
+);
+
+const updateTimelineStorageSchema = z.object({
+  quotaBytes: z.number().int().min(0),
+});
+
+adminRouter.patch(
+  "/timelines/:id/storage",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+    const admin = await requireSuperAdmin(req, res);
+    if (!admin) return;
+
+    const { id } = req.params;
+    await connectDB();
+
+    const data = parseJson(req, res, updateTimelineStorageSchema);
+    if (!data) return;
+
+    const timeline = await Timeline.findById(id);
+    if (!timeline) return notFound(res, "Timeline not found");
+
+    try {
+      const [usedBytes, settings] = await Promise.all([getTimelineUsedBytes(timeline._id), getPlatformSettings()]);
+
+      // The one rule that actually matters here — everything else about the
+      // number is the admin's call, including going below the site-wide
+      // free default for this one timeline.
+      if (data.quotaBytes < usedBytes) {
+        return badRequest(
+          res,
+          `Quota can't be set below what's already used (${(usedBytes / (1024 * 1024)).toFixed(1)} MB).`
+        );
+      }
+
+      timeline.purchasedStorageBytes = data.quotaBytes - settings.freeStorageBytesPerTimeline;
+      await timeline.save();
+
+      await logSecurityEvent({
+        userId: admin._id,
+        action: "admin_set_timeline_storage_quota",
+        ip: clientIp(req),
+        metadata: { timelineId: id, quotaBytes: data.quotaBytes },
+      });
+
+      res.json({ ok: true, usedBytes, quotaBytes: data.quotaBytes });
+    } catch (err) {
+      serverError(res, err, "Failed to update storage quota");
+    }
   })
 );
 

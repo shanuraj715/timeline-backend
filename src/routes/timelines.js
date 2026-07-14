@@ -18,7 +18,7 @@ import { ensureThemeUnlocked } from "../lib/themeUnlock.js";
 import { serializeTheme } from "./themes.js";
 import StoragePurchase from "../models/StoragePurchase.js";
 import { getPlatformSettings } from "../lib/platformSettings.js";
-import { getTimelineStorageQuota } from "../lib/storageQuota.js";
+import { getTimelineStorageQuota, getTimelineUsedBytes, formatBytes } from "../lib/storageQuota.js";
 import { purchaseStorageSchema } from "../lib/validation/storage.js";
 import { createTimelineSchema, updateTimelineSchema, inviteMemberSchema, updateMemberRoleSchema } from "../lib/validation/timeline.js";
 import { setBaseThemeSchema, createOverrideSchema } from "../lib/validation/themes.js";
@@ -839,20 +839,6 @@ timelinesRouter.get(
     }
   })
 );
-
-async function getTimelineUsedBytes(timelineId) {
-  const rows = await Media.aggregate([
-    { $match: { timelineId, deletedAt: null } },
-    { $group: { _id: null, total: { $sum: "$size" } } },
-  ]);
-  return rows[0]?.total || 0;
-}
-
-function formatBytes(bytes) {
-  if (!bytes) return "0 MB";
-  const mb = bytes / (1024 * 1024);
-  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
-}
 
 function checkBatchContentLength(req, res, next) {
   // Reject oversized requests by their declared Content-Length before
