@@ -2,7 +2,9 @@ import { Router } from "express";
 import { connectDB } from "../lib/db/connect.js";
 import User from "../models/User.js";
 import Session from "../models/Session.js";
-import { loginSchema, registerSchema, changePasswordSchema } from "../lib/validation/auth.js";
+import { loginSchema, registerSchema, changePasswordSchema, deleteAccountSchema } from "../lib/validation/auth.js";
+import Timeline from "../models/Timeline.js";
+import Membership from "../models/Membership.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
 import { verifyPassword, hashPassword } from "../lib/auth/password.js";
 import { signAccessToken } from "../lib/auth/jwt.js";
@@ -20,6 +22,7 @@ import { rateLimit } from "../lib/auth/rateLimit.js";
 import { recordFailedLogin, recordSuccessfulLogin, lockoutMessage } from "../lib/auth/lockout.js";
 import { logSecurityEvent } from "../lib/logger.js";
 import { getCurrentUser, unauthorized, notFound, clientIp } from "../lib/auth/guards.js";
+import { verifyRecaptcha } from "../lib/auth/recaptcha.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { isFeatureEnabled } from "../lib/featureFlags.js";
@@ -62,6 +65,12 @@ authRouter.post(
 
     const data = parseJson(req, res, loginSchema);
     if (!data) return;
+
+    const recaptcha = await verifyRecaptcha(data.recaptchaToken);
+    if (!recaptcha.ok) {
+      await logSecurityEvent({ action: "login_blocked_recaptcha", ip, userAgent, metadata: { reason: recaptcha.reason } });
+      return badRequest(res, "We couldn't verify you're not a robot. Please try again.");
+    }
 
     try {
       await connectDB();
@@ -144,6 +153,12 @@ authRouter.post(
 
     const data = parseJson(req, res, registerSchema);
     if (!data) return;
+
+    const recaptcha = await verifyRecaptcha(data.recaptchaToken);
+    if (!recaptcha.ok) {
+      await logSecurityEvent({ action: "register_blocked_recaptcha", ip, userAgent, metadata: { reason: recaptcha.reason } });
+      return badRequest(res, "We couldn't verify you're not a robot. Please try again.");
+    }
 
     try {
       await connectDB();
@@ -297,6 +312,50 @@ authRouter.post(
       res.json({ ok: true, message: "Password changed. Please log in again on all devices." });
     } catch (err) {
       serverError(res, err, "Failed to change password");
+    }
+  })
+);
+
+authRouter.post(
+  "/delete-account",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const data = parseJson(req, res, deleteAccountSchema);
+    if (!data) return;
+
+    try {
+      await connectDB();
+
+      const valid = await verifyPassword(data.password, user.passwordHash);
+      if (!valid) return badRequest(res, "Password is incorrect");
+
+      // Deleting an account that still owns timelines would orphan them for
+      // every other member — require the owner to transfer ownership or
+      // delete those timelines first rather than silently cascading.
+      const ownedCount = await Timeline.countDocuments({ ownerId: user._id, deletedAt: null });
+      if (ownedCount > 0) {
+        return badRequest(
+          res,
+          `You still own ${ownedCount} timeline${ownedCount === 1 ? "" : "s"}. Transfer ownership or delete ${
+            ownedCount === 1 ? "it" : "them"
+          } first.`
+        );
+      }
+
+      const ip = clientIp(req);
+      await Membership.deleteMany({ userId: user._id });
+      await revokeAllSessionsForUser(user._id, "account_deleted");
+      await logSecurityEvent({ userId: user._id, action: "account_deleted", ip });
+      await User.deleteOne({ _id: user._id });
+
+      clearAuthCookies(res);
+      res.json({ ok: true });
+    } catch (err) {
+      serverError(res, err, "Failed to delete account");
     }
   })
 );

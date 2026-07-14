@@ -12,15 +12,21 @@ export const registerSchema = z.object({
   name: z.string().trim().min(1, "Name is required").max(100),
   email,
   password,
+  recaptchaToken: z.string().optional(),
 });
 
 export const loginSchema = z.object({
   email,
   password: z.string().min(1, "Password is required").max(128),
   rememberMe: z.boolean().optional().default(false),
+  recaptchaToken: z.string().optional(),
 });
 
 export const changePasswordSchema = z.object({
   currentPassword: z.string().min(1).max(128),
   newPassword: password,
+});
+
+export const deleteAccountSchema = z.object({
+  password: z.string().min(1, "Password is required").max(128),
 });

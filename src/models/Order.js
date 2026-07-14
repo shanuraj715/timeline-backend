@@ -15,9 +15,15 @@ const OrderSchema = new Schema(
     amount: { type: Number, required: true }, // paise
     currency: { type: String, default: "INR" },
     credits: { type: Number, required: true },
-    status: { type: String, enum: ["created", "paid", "failed", "cancelled"], default: "created", index: true },
+    status: {
+      type: String,
+      enum: ["created", "paid", "failed", "cancelled", "refunded"],
+      default: "created",
+      index: true,
+    },
     metadata: { type: Schema.Types.Mixed, default: {} },
     paidAt: { type: Date, default: null },
+    refundedAt: { type: Date, default: null },
   },
   { timestamps: true }
 );

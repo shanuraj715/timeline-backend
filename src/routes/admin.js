@@ -63,6 +63,7 @@ adminRouter.get(
         name: u.name,
         email: u.email,
         role: u.role,
+        credits: u.credits,
         isLocked: u.isLocked(),
         lockUntil: u.lockUntil,
         failedLoginAttempts: u.failedLoginAttempts,
@@ -115,6 +116,42 @@ adminRouter.patch(
     }
 
     res.json({ ok: true, role: target.role, isLocked: target.isLocked() });
+  })
+);
+
+const adjustCreditsSchema = z.object({
+  amount: z.number().int().refine((v) => v !== 0, "Amount can't be zero"),
+  reason: z.string().trim().max(300).default(""),
+});
+
+adminRouter.post(
+  "/users/:id/credits",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const admin = await requireSuperAdmin(req, res);
+    if (!admin) return;
+
+    const { id } = req.params;
+    await connectDB();
+
+    const data = parseJson(req, res, adjustCreditsSchema);
+    if (!data) return;
+
+    const target = await User.findById(id);
+    if (!target) return notFound(res, "User not found");
+
+    target.credits = Math.max(0, target.credits + data.amount);
+    await target.save();
+
+    await logSecurityEvent({
+      userId: admin._id,
+      action: "admin_adjusted_credits",
+      ip: clientIp(req),
+      metadata: { targetUserId: id, amount: data.amount, reason: data.reason, balanceAfter: target.credits },
+    });
+
+    res.json({ ok: true, credits: target.credits });
   })
 );
 

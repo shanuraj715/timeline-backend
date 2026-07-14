@@ -6,7 +6,8 @@ import Order from "../models/Order.js";
 import User from "../models/User.js";
 import { upsertGatewaySchema, checkoutSchema, verifyPaymentSchema } from "../lib/validation/payments.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, getCurrentUser, unauthorized, notFound } from "../lib/auth/guards.js";
+import { requireSuperAdmin, getCurrentUser, unauthorized, notFound, clientIp } from "../lib/auth/guards.js";
+import { logSecurityEvent } from "../lib/logger.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { isFeatureEnabled } from "../lib/featureFlags.js";
@@ -327,6 +328,46 @@ paymentsRouter.get(
         paidAt: o.paidAt,
       })),
     });
+  })
+);
+
+// ---- Refunds (admin) ----
+// Bookkeeping-only: reverses the credits an order granted, it does not call
+// out to the payment gateway to actually return money. Real gateway refunds
+// (Razorpay's refund API etc.) need a merchant-side decision per provider
+// this app doesn't make on its own — this just keeps the ledger honest once
+// that's been handled elsewhere.
+
+paymentsRouter.post(
+  "/orders/:id/refund",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+    const admin = await requireSuperAdmin(req, res);
+    if (!admin) return;
+
+    await connectDB();
+    const order = await Order.findById(req.params.id);
+    if (!order) return notFound(res, "Order not found");
+    if (order.status !== "paid") return badRequest(res, "Only a paid order can be refunded");
+
+    const user = await User.findById(order.userId);
+    if (user) {
+      user.credits = Math.max(0, user.credits - order.credits);
+      await user.save();
+    }
+
+    order.status = "refunded";
+    order.refundedAt = new Date();
+    await order.save();
+
+    await logSecurityEvent({
+      userId: admin._id,
+      action: "admin_refunded_order",
+      ip: clientIp(req),
+      metadata: { orderId: order._id.toString(), targetUserId: order.userId.toString(), credits: order.credits },
+    });
+
+    res.json({ ok: true, order: { id: order._id.toString(), status: order.status, refundedAt: order.refundedAt } });
   })
 );
 

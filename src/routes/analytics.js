@@ -13,6 +13,26 @@ function daysParam(req, fallback = 30) {
   return Math.min(Math.floor(raw), 365);
 }
 
+// Resolves the query window: an explicit ?from=&to= range (used for the
+// "custom", "monthly", and "yearly" presets) takes priority over the older
+// ?days= rolling-window param (still used by the 7/30/90-day presets).
+// groupBy controls date bucketing — "month" for longer ranges where a daily
+// point-per-day would be too dense to read.
+function rangeParams(req, fallback = 30) {
+  const from = req.query.from ? new Date(req.query.from) : null;
+  const to = req.query.to ? new Date(req.query.to) : null;
+  const groupBy = req.query.groupBy === "month" ? "month" : "day";
+
+  if (from instanceof Date && !isNaN(from) && to instanceof Date && !isNaN(to)) {
+    return { since: from, until: to, groupBy };
+  }
+
+  const days = daysParam(req, fallback);
+  return { since: new Date(Date.now() - days * 24 * 60 * 60 * 1000), until: new Date(), groupBy };
+}
+
+const DATE_FORMAT = { day: "%Y-%m-%d", month: "%Y-%m" };
+
 analyticsRouter.get(
   "/summary",
   asyncHandler(async (req, res) => {
@@ -59,14 +79,13 @@ analyticsRouter.get(
     if (!admin) return;
 
     await connectDB();
-    const days = daysParam(req);
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const { since, until, groupBy } = rangeParams(req);
 
     const rows = await Order.aggregate([
-      { $match: { status: "paid", paidAt: { $gte: since } } },
+      { $match: { status: "paid", paidAt: { $gte: since, $lte: until } } },
       {
         $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: "$paidAt" } },
+          _id: { $dateToString: { format: DATE_FORMAT[groupBy], date: "$paidAt" } },
           revenue: { $sum: "$amount" },
           orders: { $sum: 1 },
         },
@@ -85,14 +104,13 @@ analyticsRouter.get(
     if (!admin) return;
 
     await connectDB();
-    const days = daysParam(req);
-    const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+    const { since, until, groupBy } = rangeParams(req);
 
     const rows = await User.aggregate([
-      { $match: { createdAt: { $gte: since } } },
+      { $match: { createdAt: { $gte: since, $lte: until } } },
       {
         $group: {
-          _id: { $dateToString: { format: "%Y-%m-%d", date: "$createdAt" } },
+          _id: { $dateToString: { format: DATE_FORMAT[groupBy], date: "$createdAt" } },
           count: { $sum: 1 },
         },
       },
@@ -121,14 +139,16 @@ analyticsRouter.get(
     res.json({
       orders: orders.map((o) => ({
         id: o._id.toString(),
-        user: o.userId ? { name: o.userId.name, email: o.userId.email } : null,
+        user: o.userId ? { id: o.userId._id.toString(), name: o.userId.name, email: o.userId.email } : null,
         plan: o.planId ? { name: o.planId.name, credits: o.planId.credits } : null,
         gatewayProvider: o.gatewayProvider,
         amount: o.amount,
         currency: o.currency,
+        credits: o.credits,
         status: o.status,
         createdAt: o.createdAt,
         paidAt: o.paidAt,
+        refundedAt: o.refundedAt,
       })),
     });
   })

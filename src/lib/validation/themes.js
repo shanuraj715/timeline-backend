@@ -1,6 +1,9 @@
 import { z } from "zod";
 
 const hexColor = z.string().regex(/^#[0-9a-fA-F]{6}$/, "Must be a hex color like #0a84ff");
+// "" means "use the app's default styling" — distinct from primary/
+// secondary/background, which always have a real color.
+const optionalHexColor = z.union([hexColor, z.literal("")]).default("");
 const slugPattern = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 
 export const createThemeSchema = z.object({
@@ -19,8 +22,15 @@ export const createThemeSchema = z.object({
       primary: hexColor.default("#0a84ff"),
       secondary: hexColor.default("#6e6e73"),
       background: hexColor.default("#fbfbfd"),
+      node: optionalHexColor,
+      edge: optionalHexColor,
+      dateChipBackground: optionalHexColor,
+      dateChipText: optionalHexColor,
     })
     .default({}),
+  imagePosition: z.enum(["center", "top", "bottom"]).default("center"),
+  overlayStyle: z.enum(["gradient", "solid", "none"]).default("gradient"),
+  overlayOpacity: z.number().int().min(0).max(100).default(60),
   priceCredits: z.number().int().min(0).default(0),
   status: z.enum(["draft", "published"]).default("draft"),
 });
