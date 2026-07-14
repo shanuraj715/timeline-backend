@@ -6,6 +6,7 @@ import Timeline from "../models/Timeline.js";
 import Membership from "../models/Membership.js";
 import Media from "../models/Media.js";
 import ActivityLog from "../models/ActivityLog.js";
+import Order from "../models/Order.js";
 import { requireSuperAdmin, notFound, clientIp } from "../lib/auth/guards.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
 import { revokeAllSessionsForUser } from "../lib/auth/session.js";
@@ -51,13 +52,20 @@ adminRouter.get(
 
     await connectDB();
     const q = typeof req.query.q === "string" ? req.query.q.trim() : undefined;
-    const limit = Math.min(Number(req.query.limit) || 50, 100);
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
 
     const query = q
       ? { $or: [{ name: { $regex: q, $options: "i" } }, { email: { $regex: q, $options: "i" } }] }
       : {};
 
-    const users = await User.find(query).sort({ createdAt: -1 }).limit(limit);
+    const [users, total] = await Promise.all([
+      User.find(query)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit),
+      User.countDocuments(query),
+    ]);
 
     res.json({
       users: users.map((u) => ({
@@ -72,6 +80,9 @@ adminRouter.get(
         lastLoginAt: u.lastLoginAt,
         createdAt: u.createdAt,
       })),
+      total,
+      page,
+      limit,
     });
   })
 );
@@ -216,10 +227,18 @@ adminRouter.get(
 
     await connectDB();
     const q = typeof req.query.q === "string" ? req.query.q.trim() : undefined;
-    const limit = Math.min(Number(req.query.limit) || 50, 100);
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
 
     const query = { deletedAt: null, ...(q ? { title: { $regex: q, $options: "i" } } : {}) };
-    const timelines = await Timeline.find(query).sort({ createdAt: -1 }).limit(limit).populate("ownerId", "name email");
+    const [timelines, total] = await Promise.all([
+      Timeline.find(query)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .populate("ownerId", "name email"),
+      Timeline.countDocuments(query),
+    ]);
 
     const ids = timelines.map((t) => t._id);
     const [memberCounts, mediaCounts, storageBytes, settings] = await Promise.all([
@@ -244,6 +263,9 @@ adminRouter.get(
         quotaBytes: settings.freeStorageBytesPerTimeline + (t.purchasedStorageBytes || 0),
         createdAt: t.createdAt,
       })),
+      total,
+      page,
+      limit,
     });
   })
 );
@@ -298,6 +320,69 @@ adminRouter.patch(
   })
 );
 
+// Superseded the analytics/recent-orders route for this table — that one
+// is still used as-is for the small "recent activity" dashboard widget,
+// but it hard-caps at 50 rows with no way to page further, which doesn't
+// work for a full transaction list that only grows over time.
+adminRouter.get(
+  "/orders",
+  asyncHandler(async (req, res) => {
+    const admin = await requireSuperAdmin(req, res);
+    if (!admin) return;
+
+    await connectDB();
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Number(req.query.limit) || 20, 100);
+    const status = typeof req.query.status === "string" ? req.query.status.trim() : undefined;
+
+    const query = status && status !== "all" ? { status } : {};
+
+    const [orders, total] = await Promise.all([
+      Order.find(query)
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .populate("userId", "name email")
+        .populate("planId", "name credits"),
+      Order.countDocuments(query),
+    ]);
+
+    res.json({
+      orders: orders.map((o) => ({
+        id: o._id.toString(),
+        user: o.userId ? { id: o.userId._id.toString(), name: o.userId.name, email: o.userId.email } : null,
+        plan: o.planId ? { name: o.planId.name, credits: o.planId.credits } : null,
+        gatewayProvider: o.gatewayProvider,
+        amount: o.amount,
+        currency: o.currency,
+        credits: o.credits,
+        status: o.status,
+        createdAt: o.createdAt,
+        paidAt: o.paidAt,
+        refundedAt: o.refundedAt,
+      })),
+      total,
+      page,
+      limit,
+    });
+  })
+);
+
+// Distinct actions for the filter dropdown — derived from real data instead
+// of a hardcoded list, so a newly-added logSecurityEvent() action shows up
+// here automatically instead of needing this route updated too.
+adminRouter.get(
+  "/security-log/actions",
+  asyncHandler(async (req, res) => {
+    const admin = await requireSuperAdmin(req, res);
+    if (!admin) return;
+
+    await connectDB();
+    const actions = await ActivityLog.distinct("action", { kind: "security" });
+    res.json({ actions: actions.sort() });
+  })
+);
+
 adminRouter.get(
   "/security-log",
   asyncHandler(async (req, res) => {
@@ -309,7 +394,30 @@ adminRouter.get(
     const limit = Math.min(Number(req.query.limit) || 50, 100);
 
     const query = { kind: "security" };
-    if (cursor) query.createdAt = { $lt: new Date(cursor) };
+
+    const createdAt = {};
+    if (cursor) createdAt.$lt = new Date(cursor);
+    if (req.query.dateFrom) createdAt.$gte = new Date(req.query.dateFrom);
+    if (req.query.dateTo) createdAt.$lte = new Date(req.query.dateTo);
+    if (Object.keys(createdAt).length > 0) query.createdAt = createdAt;
+
+    if (typeof req.query.action === "string" && req.query.action.trim()) {
+      query.action = req.query.action.trim();
+    }
+    if (typeof req.query.ip === "string" && req.query.ip.trim()) {
+      query.ip = { $regex: req.query.ip.trim(), $options: "i" };
+    }
+    if (typeof req.query.userEmail === "string" && req.query.userEmail.trim()) {
+      const matchingUsers = await User.find({
+        $or: [
+          { name: { $regex: req.query.userEmail.trim(), $options: "i" } },
+          { email: { $regex: req.query.userEmail.trim(), $options: "i" } },
+        ],
+      }).select("_id");
+      // No match still needs to produce an empty result set, not "no filter" —
+      // an id no real ActivityLog row will ever have.
+      query.userId = { $in: matchingUsers.length > 0 ? matchingUsers.map((u) => u._id) : [null] };
+    }
 
     const entries = await ActivityLog.find(query).sort({ createdAt: -1 }).limit(limit + 1).populate("userId", "name email");
     const hasMore = entries.length > limit;
