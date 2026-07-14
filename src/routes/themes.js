@@ -16,7 +16,7 @@ export const themesRouter = Router();
 
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
-function serializeTheme(theme) {
+export function serializeTheme(theme) {
   return {
     id: theme._id.toString(),
     name: theme.name,

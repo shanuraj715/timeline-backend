@@ -11,7 +11,13 @@ import DaySummary from "../models/DaySummary.js";
 import Invitation from "../models/Invitation.js";
 import User from "../models/User.js";
 import ActivityLog from "../models/ActivityLog.js";
+import Theme from "../models/Theme.js";
+import ThemeUnlock from "../models/ThemeUnlock.js";
+import TimelineThemeOverride from "../models/TimelineThemeOverride.js";
+import { ensureThemeUnlocked } from "../lib/themeUnlock.js";
+import { serializeTheme } from "./themes.js";
 import { createTimelineSchema, updateTimelineSchema, inviteMemberSchema, updateMemberRoleSchema } from "../lib/validation/timeline.js";
+import { setBaseThemeSchema, createOverrideSchema } from "../lib/validation/themes.js";
 import { searchMediaSchema } from "../lib/validation/media.js";
 import { parseJson, serverError, badRequest, fromZodError } from "../lib/apiError.js";
 import {
@@ -128,12 +134,14 @@ timelinesRouter.post(
     try {
       await connectDB();
       const slug = await generateUniqueSlug(data.title);
+      const defaultTheme = await Theme.findOne({ isDefault: true, status: "published" });
 
       const timeline = await Timeline.create({
         title: data.title,
         description: data.description,
         slug,
         ownerId: user._id,
+        themeId: defaultTheme?._id || null,
       });
 
       await Membership.create({
@@ -1138,5 +1146,206 @@ timelinesRouter.get(
       pageCount: Math.max(Math.ceil(total / limit), 1),
       total,
     });
+  })
+);
+
+// ---- Theme ----
+// Resolution ("which theme is active today" vs "which theme was active on
+// a specific day being viewed") is deliberately left to the frontend —
+// these routes just hand over the base theme + the full override list, so
+// one GET works for both the ambient page-level context (today) and the
+// media viewer's per-day context (that day's own date) without needing
+// two different backend endpoints.
+
+timelinesRouter.get(
+  "/:slug/theme",
+  asyncHandler(async (req, res) => {
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("viewTimeline", membership, res)) return;
+
+    const [baseTheme, overrides] = await Promise.all([
+      timeline.themeId ? Theme.findById(timeline.themeId) : null,
+      TimelineThemeOverride.find({ timelineId: timeline._id }).populate("themeId").sort({ startDate: 1 }),
+    ]);
+
+    res.json({
+      baseTheme: baseTheme ? serializeTheme(baseTheme) : null,
+      overrides: overrides
+        .filter((o) => o.themeId) // guard against a since-deleted theme
+        .map((o) => ({
+          id: o._id.toString(),
+          theme: serializeTheme(o.themeId),
+          startDate: o.startDate,
+          endDate: o.endDate,
+          label: o.label,
+        })),
+    });
+  })
+);
+
+timelinesRouter.get(
+  "/:slug/theme/catalog",
+  asyncHandler(async (req, res) => {
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("changeTimelineTheme", membership, res)) return;
+
+    const [themes, unlocks] = await Promise.all([
+      Theme.find({ status: "published" }).sort({ order: 1, createdAt: -1 }),
+      ThemeUnlock.find({ timelineId: timeline._id }),
+    ]);
+    const unlockedThemeIds = new Set(unlocks.map((u) => u.themeId.toString()));
+
+    res.json({
+      themes: themes.map((t) => ({
+        ...serializeTheme(t),
+        isUnlocked: t.priceCredits === 0 || unlockedThemeIds.has(t._id.toString()),
+        isCurrent: timeline.themeId?.toString() === t._id.toString(),
+      })),
+    });
+  })
+);
+
+timelinesRouter.put(
+  "/:slug/theme",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("changeTimelineTheme", membership, res)) return;
+
+    const data = parseJson(req, res, setBaseThemeSchema);
+    if (!data) return;
+
+    try {
+      const theme = await Theme.findOne({ _id: data.themeId, status: "published" });
+      if (!theme) return notFound(res, "Theme not found");
+
+      const unlock = await ensureThemeUnlocked(timeline._id, theme, user);
+      if (!unlock.ok) return badRequest(res, unlock.error);
+
+      timeline.themeId = theme._id;
+      await timeline.save();
+
+      await logActivity({
+        userId: user._id,
+        timelineId: timeline._id,
+        action: "timeline_theme_changed",
+        targetType: "theme",
+        targetId: theme._id,
+        ip: clientIp(req),
+      });
+
+      res.json({ baseTheme: serializeTheme(theme) });
+    } catch (err) {
+      serverError(res, err, "Failed to change theme");
+    }
+  })
+);
+
+timelinesRouter.post(
+  "/:slug/theme/overrides",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("changeTimelineTheme", membership, res)) return;
+
+    const data = parseJson(req, res, createOverrideSchema);
+    if (!data) return;
+
+    try {
+      const theme = await Theme.findOne({ _id: data.themeId, status: "published" });
+      if (!theme) return notFound(res, "Theme not found");
+
+      const overlap = await TimelineThemeOverride.findOne({
+        timelineId: timeline._id,
+        startDate: { $lte: data.endDate },
+        endDate: { $gte: data.startDate },
+      });
+      if (overlap) return badRequest(res, "This date range overlaps an existing theme override");
+
+      const unlock = await ensureThemeUnlocked(timeline._id, theme, user);
+      if (!unlock.ok) return badRequest(res, unlock.error);
+
+      const override = await TimelineThemeOverride.create({
+        timelineId: timeline._id,
+        themeId: theme._id,
+        startDate: data.startDate,
+        endDate: data.endDate,
+        label: data.label || theme.name,
+      });
+
+      await logActivity({
+        userId: user._id,
+        timelineId: timeline._id,
+        action: "timeline_theme_override_added",
+        targetType: "theme",
+        targetId: theme._id,
+        metadata: { startDate: data.startDate, endDate: data.endDate },
+        ip: clientIp(req),
+      });
+
+      res.status(201).json({
+        override: {
+          id: override._id.toString(),
+          theme: serializeTheme(theme),
+          startDate: override.startDate,
+          endDate: override.endDate,
+          label: override.label,
+        },
+      });
+    } catch (err) {
+      serverError(res, err, "Failed to add theme override");
+    }
+  })
+);
+
+timelinesRouter.delete(
+  "/:slug/theme/overrides/:id",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug, id } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("changeTimelineTheme", membership, res)) return;
+
+    const override = await TimelineThemeOverride.findOneAndDelete({ _id: id, timelineId: timeline._id });
+    if (!override) return notFound(res, "Theme override not found");
+
+    res.json({ ok: true });
   })
 );
