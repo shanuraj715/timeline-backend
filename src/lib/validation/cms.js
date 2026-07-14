@@ -32,6 +32,8 @@ export const footerColumnSchema = z.object({
   title: z.string().trim().min(1, "Title is required").max(80),
   order: z.number().int().default(0),
   enabled: z.boolean().default(true),
+  contentType: z.enum(["links", "html"]).default("links"),
+  html: z.string().max(20_000).default(""),
   links: z.array(footerLinkSchema).max(30).default([]),
 });
 
@@ -51,6 +53,7 @@ export const createPageSchema = z.object({
     .max(150)
     .regex(slugPattern, "Slug must be lowercase letters, numbers, and hyphens only"),
   content: z.string().max(200_000).default(""),
+  showTitle: z.boolean().default(true),
   status: z.enum(["draft", "published"]).default("draft"),
   seoTitle: z.string().trim().max(150).default(""),
   seoDescription: z.string().trim().max(300).default(""),

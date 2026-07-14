@@ -280,13 +280,14 @@ publicCmsRouter.get(
     const items = await NavItem.find({ enabled: true }).sort({ order: 1 });
     res.json({
       items: items.map((i) => ({
+        id: i._id.toString(),
         label: i.label,
         url: i.url,
         openInNewTab: i.openInNewTab,
         children: i.children
           .filter((c) => c.enabled)
           .sort((a, b) => a.order - b.order)
-          .map((c) => ({ label: c.label, url: c.url, openInNewTab: c.openInNewTab })),
+          .map((c) => ({ id: c._id.toString(), label: c.label, url: c.url, openInNewTab: c.openInNewTab })),
       })),
     });
   })
@@ -299,11 +300,14 @@ publicCmsRouter.get(
     const columns = await FooterColumn.find({ enabled: true }).sort({ order: 1 });
     res.json({
       columns: columns.map((c) => ({
+        id: c._id.toString(),
         title: c.title,
+        contentType: c.contentType,
+        html: c.html,
         links: c.links
           .slice()
           .sort((a, b) => a.order - b.order)
-          .map((l) => ({ label: l.label, url: l.url, openInNewTab: l.openInNewTab })),
+          .map((l) => ({ id: l._id.toString(), label: l.label, url: l.url, openInNewTab: l.openInNewTab })),
       })),
     });
   })
@@ -320,6 +324,7 @@ publicCmsRouter.get(
         title: page.title,
         slug: page.slug,
         content: page.content,
+        showTitle: page.showTitle,
         seoTitle: page.seoTitle,
         seoDescription: page.seoDescription,
         publishedAt: page.publishedAt,
