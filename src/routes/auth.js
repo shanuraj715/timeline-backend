@@ -22,6 +22,7 @@ import { logSecurityEvent } from "../lib/logger.js";
 import { getCurrentUser, unauthorized, notFound, clientIp } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
+import { isFeatureEnabled } from "../lib/featureFlags.js";
 
 export const authRouter = Router();
 
@@ -129,6 +130,11 @@ authRouter.post(
   "/register",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    await connectDB();
+    if (!(await isFeatureEnabled("registration_enabled"))) {
+      return res.status(403).json({ error: "New registrations are temporarily disabled", code: "FEATURE_DISABLED" });
+    }
 
     const ip = requestIp(req);
     const userAgent = req.headers["user-agent"] || "";

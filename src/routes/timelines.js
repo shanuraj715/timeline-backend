@@ -30,6 +30,7 @@ import { signMediaToken } from "../lib/auth/mediaToken.js";
 import { serializeMedia } from "../lib/media/serialize.js";
 import { canAssignRole } from "../lib/rbac/permissions.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
+import { isFeatureEnabled } from "../lib/featureFlags.js";
 import { validateMediaFile } from "../lib/media/fileValidation.js";
 import { computeChecksum } from "../lib/media/checksum.js";
 import { extractImageExif } from "../lib/media/exif.js";
@@ -639,6 +640,9 @@ timelinesRouter.post(
     if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
 
     if (!checkPermission("inviteMembers", membership, res)) return;
+    if (!(await isFeatureEnabled("invitations_enabled"))) {
+      return res.status(403).json({ error: "Invitations are temporarily disabled", code: "FEATURE_DISABLED" });
+    }
 
     const data = parseJson(req, res, inviteMemberSchema);
     if (!data) return;
@@ -834,6 +838,9 @@ timelinesRouter.post(
     if (!checkPermission("uploadMedia", membership, res)) return;
     if (membership.role === "editor" && !timeline.settings.allowMemberUploads) {
       return forbidden(res, "The timeline owner has disabled uploads from editors");
+    }
+    if (!(await isFeatureEnabled("uploads_enabled"))) {
+      return res.status(403).json({ error: "Uploads are temporarily disabled", code: "FEATURE_DISABLED" });
     }
 
     const files = req.files || [];

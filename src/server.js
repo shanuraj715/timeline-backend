@@ -6,6 +6,8 @@ import { adminRouter } from "./routes/admin.js";
 import { timelinesRouter } from "./routes/timelines.js";
 import { invitationsRouter } from "./routes/invitations.js";
 import { mediaRouter } from "./routes/media.js";
+import { cmsRouter, publicCmsRouter } from "./routes/cms.js";
+import { featureFlagsRouter, publicFeatureFlagsRouter } from "./routes/featureFlags.js";
 import { serverError } from "./lib/apiError.js";
 
 const PORT = process.env.PORT || 4000;
@@ -36,6 +38,10 @@ app.use("/api/admin", adminRouter);
 app.use("/api/timelines", timelinesRouter);
 app.use("/api/invitations", invitationsRouter);
 app.use("/api/media", mediaRouter);
+app.use("/api/cms", cmsRouter);
+app.use("/api/feature-flags", featureFlagsRouter);
+app.use("/api/public", publicCmsRouter);
+app.use("/api/public/feature-flags", publicFeatureFlagsRouter);
 
 // Catches anything forwarded via asyncHandler's `.catch(next)` from any
 // route that didn't already handle its own errors — the equivalent of the
