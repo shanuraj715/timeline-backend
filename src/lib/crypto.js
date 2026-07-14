@@ -35,9 +35,14 @@ export function decryptSecret(encoded) {
   return plaintext.toString("utf8");
 }
 
-/** Last 4 chars of a secret for display, e.g. "••••7f2a" — never returns the real value. */
+// Plain ASCII on purpose (not a Unicode bullet character) — a masked value
+// round-trips through shells, URL-encoding, and any client unchanged, with
+// no multi-byte-encoding failure mode to worry about.
+export const MASK_PREFIX = "****";
+
+/** Last 4 chars of a secret for display, e.g. "****7f2a" — never returns the real value. */
 export function maskSecret(plainText) {
   const str = String(plainText || "");
-  if (str.length <= 4) return "••••";
-  return `••••${str.slice(-4)}`;
+  if (str.length <= 4) return MASK_PREFIX;
+  return `${MASK_PREFIX}${str.slice(-4)}`;
 }

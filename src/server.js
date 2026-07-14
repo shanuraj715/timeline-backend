@@ -8,13 +8,20 @@ import { invitationsRouter } from "./routes/invitations.js";
 import { mediaRouter } from "./routes/media.js";
 import { cmsRouter, publicCmsRouter } from "./routes/cms.js";
 import { featureFlagsRouter, publicFeatureFlagsRouter } from "./routes/featureFlags.js";
+import { pricingRouter, publicPricingRouter } from "./routes/pricing.js";
+import { paymentsRouter, publicPaymentsRouter } from "./routes/payments.js";
 import { serverError } from "./lib/apiError.js";
 
 const PORT = process.env.PORT || 4000;
 
 const app = express();
 
-app.use(express.json());
+// The `verify` hook stashes the raw request bytes on req.rawBody for the
+// Razorpay webhook route, which must validate its HMAC signature against
+// the exact bytes Razorpay signed — a re-serialized req.body could differ
+// byte-for-byte even with identical field values. Every other route just
+// ignores req.rawBody and uses the parsed req.body as before.
+app.use(express.json({ verify: (req, res, buf) => { req.rawBody = buf; } }));
 app.use(cookieParser());
 
 // express.json() throws a SyntaxError (from body-parser) for a malformed
@@ -40,8 +47,12 @@ app.use("/api/invitations", invitationsRouter);
 app.use("/api/media", mediaRouter);
 app.use("/api/cms", cmsRouter);
 app.use("/api/feature-flags", featureFlagsRouter);
+app.use("/api/pricing", pricingRouter);
+app.use("/api/payments", paymentsRouter);
 app.use("/api/public", publicCmsRouter);
 app.use("/api/public/feature-flags", publicFeatureFlagsRouter);
+app.use("/api/public/pricing", publicPricingRouter);
+app.use("/api/public/payment-gateways", publicPaymentsRouter);
 
 // Catches anything forwarded via asyncHandler's `.catch(next)` from any
 // route that didn't already handle its own errors — the equivalent of the
