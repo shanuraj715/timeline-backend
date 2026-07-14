@@ -38,4 +38,10 @@ export const STARTER_FLAGS = [
     label: "Search",
     description: "Allow searching media within a timeline.",
   },
+  {
+    key: "recaptcha_enabled",
+    label: "reCAPTCHA verification",
+    description:
+      "Require Google reCAPTCHA verification on login and registration. Only takes effect if reCAPTCHA keys are configured — this is an on/off switch on top of that, not a replacement for it.",
+  },
 ];
