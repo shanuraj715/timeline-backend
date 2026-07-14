@@ -19,6 +19,7 @@ export const permissions = {
   editMediaMetadata: (role) => roleAtLeast(role, "editor"),
   deleteMedia: (role) => roleAtLeast(role, "editor"),
   restoreMedia: (role) => roleAtLeast(role, "editor"),
+  changeTimelineTheme: (role) => roleAtLeast(role, "editor"),
 
   editTimelineDetails: (role) => roleAtLeast(role, "admin"),
   inviteMembers: (role) => roleAtLeast(role, "admin"),

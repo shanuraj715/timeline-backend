@@ -9,6 +9,7 @@ const TimelineSchema = new Schema(
     slug: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
     coverMediaId: { type: Schema.Types.ObjectId, ref: "Media", default: null },
     ownerId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
+    themeId: { type: Schema.Types.ObjectId, ref: "Theme", default: null },
     settings: {
       allowMemberUploads: { type: Boolean, default: true },
       defaultRole: { type: String, enum: ["viewer", "editor"], default: "viewer" },

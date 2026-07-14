@@ -11,6 +11,7 @@ import { featureFlagsRouter, publicFeatureFlagsRouter } from "./routes/featureFl
 import { pricingRouter, publicPricingRouter } from "./routes/pricing.js";
 import { paymentsRouter, publicPaymentsRouter } from "./routes/payments.js";
 import { analyticsRouter } from "./routes/analytics.js";
+import { themesRouter } from "./routes/themes.js";
 import { serverError } from "./lib/apiError.js";
 
 const PORT = process.env.PORT || 4000;
@@ -51,6 +52,7 @@ app.use("/api/feature-flags", featureFlagsRouter);
 app.use("/api/pricing", pricingRouter);
 app.use("/api/payments", paymentsRouter);
 app.use("/api/analytics", analyticsRouter);
+app.use("/api/themes", themesRouter);
 app.use("/api/public", publicCmsRouter);
 app.use("/api/public/feature-flags", publicFeatureFlagsRouter);
 app.use("/api/public/pricing", publicPricingRouter);

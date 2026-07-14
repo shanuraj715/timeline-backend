@@ -15,3 +15,6 @@ export { default as PricingPlan } from "./PricingPlan.js";
 export { default as PaymentGateway } from "./PaymentGateway.js";
 export { default as Order } from "./Order.js";
 export { default as FeatureFlag } from "./FeatureFlag.js";
+export { default as Theme } from "./Theme.js";
+export { default as ThemeUnlock } from "./ThemeUnlock.js";
+export { default as TimelineThemeOverride } from "./TimelineThemeOverride.js";
