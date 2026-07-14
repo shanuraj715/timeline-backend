@@ -16,6 +16,11 @@ import ThemeUnlock from "../models/ThemeUnlock.js";
 import TimelineThemeOverride from "../models/TimelineThemeOverride.js";
 import { ensureThemeUnlocked } from "../lib/themeUnlock.js";
 import { serializeTheme } from "./themes.js";
+import StoragePlan from "../models/StoragePlan.js";
+import StoragePurchase from "../models/StoragePurchase.js";
+import { serializeStoragePlan } from "./storagePlans.js";
+import { getPlatformSettings } from "../lib/platformSettings.js";
+import { purchaseStorageSchema } from "../lib/validation/storagePlans.js";
 import { createTimelineSchema, updateTimelineSchema, inviteMemberSchema, updateMemberRoleSchema } from "../lib/validation/timeline.js";
 import { setBaseThemeSchema, createOverrideSchema } from "../lib/validation/themes.js";
 import { searchMediaSchema } from "../lib/validation/media.js";
@@ -34,7 +39,7 @@ import { logActivity } from "../lib/logger.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { signMediaToken } from "../lib/auth/mediaToken.js";
 import { serializeMedia } from "../lib/media/serialize.js";
-import { canAssignRole } from "../lib/rbac/permissions.js";
+import { canAssignRole, permissions } from "../lib/rbac/permissions.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { isFeatureEnabled } from "../lib/featureFlags.js";
 import { validateMediaFile } from "../lib/media/fileValidation.js";
@@ -133,6 +138,26 @@ timelinesRouter.post(
 
     try {
       await connectDB();
+
+      const settings = await getPlatformSettings();
+      const ownedCount = await Timeline.countDocuments({ ownerId: user._id, deletedAt: null });
+      let creditsSpent = 0;
+
+      if (ownedCount >= settings.freeTimelinesPerAccount) {
+        const freshUser = await User.findById(user._id);
+        if (freshUser.credits < settings.creditsPerExtraTimeline) {
+          return badRequest(
+            res,
+            `You've used your ${settings.freeTimelinesPerAccount} free timeline${
+              settings.freeTimelinesPerAccount === 1 ? "" : "s"
+            }. Creating another one costs ${settings.creditsPerExtraTimeline} credits — you have ${freshUser.credits}.`
+          );
+        }
+        freshUser.credits -= settings.creditsPerExtraTimeline;
+        await freshUser.save();
+        creditsSpent = settings.creditsPerExtraTimeline;
+      }
+
       const slug = await generateUniqueSlug(data.title);
       const defaultTheme = await Theme.findOne({ isDefault: true, status: "published" });
 
@@ -142,6 +167,7 @@ timelinesRouter.post(
         slug,
         ownerId: user._id,
         themeId: defaultTheme?._id || null,
+        storageQuotaBytes: settings.freeStorageBytesPerTimeline,
       });
 
       await Membership.create({
@@ -157,6 +183,7 @@ timelinesRouter.post(
         action: "timeline_created",
         targetType: "timeline",
         targetId: timeline._id,
+        metadata: creditsSpent > 0 ? { creditsSpent } : undefined,
         ip: clientIp(req),
       });
 
@@ -815,6 +842,20 @@ timelinesRouter.get(
   })
 );
 
+async function getTimelineUsedBytes(timelineId) {
+  const rows = await Media.aggregate([
+    { $match: { timelineId, deletedAt: null } },
+    { $group: { _id: null, total: { $sum: "$size" } } },
+  ]);
+  return rows[0]?.total || 0;
+}
+
+function formatBytes(bytes) {
+  if (!bytes) return "0 MB";
+  const mb = bytes / (1024 * 1024);
+  return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
+
 function checkBatchContentLength(req, res, next) {
   // Reject oversized requests by their declared Content-Length before
   // multer buffers the whole multipart body into memory — the per-file size
@@ -853,6 +894,18 @@ timelinesRouter.post(
 
     const files = req.files || [];
     if (files.length === 0) return badRequest(res, "No files were provided");
+
+    const batchBytes = files.reduce((sum, f) => sum + f.size, 0);
+    const usedBytes = await getTimelineUsedBytes(timeline._id);
+    if (usedBytes + batchBytes > timeline.storageQuotaBytes) {
+      const remaining = Math.max(timeline.storageQuotaBytes - usedBytes, 0);
+      return res.status(413).json({
+        error: `This timeline has ${formatBytes(remaining)} of storage left, but this upload needs ${formatBytes(
+          batchBytes
+        )}. Buy more storage to continue.`,
+        code: "STORAGE_QUOTA_EXCEEDED",
+      });
+    }
 
     let clientDates = [];
     try {
@@ -1347,5 +1400,92 @@ timelinesRouter.delete(
     if (!override) return notFound(res, "Theme override not found");
 
     res.json({ ok: true });
+  })
+);
+
+// ---- Storage quota ----
+
+timelinesRouter.get(
+  "/:slug/storage",
+  asyncHandler(async (req, res) => {
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("viewTimeline", membership, res)) return;
+
+    const [usedBytes, plans] = await Promise.all([
+      getTimelineUsedBytes(timeline._id),
+      StoragePlan.find({ isActive: true }).sort({ order: 1, bytes: 1 }),
+    ]);
+
+    res.json({
+      usedBytes,
+      quotaBytes: timeline.storageQuotaBytes,
+      canManage: permissions.manageTimelineStorage(membership.role),
+      plans: plans.map(serializeStoragePlan),
+    });
+  })
+);
+
+timelinesRouter.post(
+  "/:slug/storage/purchase",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("manageTimelineStorage", membership, res)) return;
+
+    const data = parseJson(req, res, purchaseStorageSchema);
+    if (!data) return;
+
+    try {
+      const plan = await StoragePlan.findOne({ _id: data.storagePlanId, isActive: true });
+      if (!plan) return notFound(res, "Storage plan not found");
+
+      const freshUser = await User.findById(user._id);
+      if (freshUser.credits < plan.priceCredits) {
+        return badRequest(res, "Not enough credits to buy this storage plan");
+      }
+
+      freshUser.credits -= plan.priceCredits;
+      await freshUser.save();
+
+      timeline.storageQuotaBytes += plan.bytes;
+      await timeline.save();
+
+      await StoragePurchase.create({
+        timelineId: timeline._id,
+        storagePlanId: plan._id,
+        bytesGranted: plan.bytes,
+        creditsSpent: plan.priceCredits,
+        purchasedByUserId: user._id,
+      });
+
+      await logActivity({
+        userId: user._id,
+        timelineId: timeline._id,
+        action: "timeline_storage_purchased",
+        targetType: "storagePlan",
+        targetId: plan._id,
+        metadata: { bytes: plan.bytes, creditsSpent: plan.priceCredits },
+        ip: clientIp(req),
+      });
+
+      res.json({ ok: true, quotaBytes: timeline.storageQuotaBytes, credits: freshUser.credits });
+    } catch (err) {
+      serverError(res, err, "Failed to purchase storage");
+    }
   })
 );

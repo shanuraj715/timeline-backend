@@ -12,9 +12,12 @@ const OrderSchema = new Schema(
     gatewayProvider: { type: String, enum: ["razorpay", "phonepe", "upi", "mock"], required: true },
     gatewayOrderId: { type: String, default: null },
     gatewayPaymentId: { type: String, default: null },
-    amount: { type: Number, required: true }, // paise
+    amount: { type: Number, required: true }, // paise, after any coupon discount — what's actually charged
+    originalAmount: { type: Number, default: null }, // paise, pre-discount — null when no coupon was used
     currency: { type: String, default: "INR" },
     credits: { type: Number, required: true },
+    couponCode: { type: String, default: null },
+    discountAmount: { type: Number, default: 0 }, // paise
     status: {
       type: String,
       enum: ["created", "paid", "failed", "cancelled", "refunded"],

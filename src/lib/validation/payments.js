@@ -14,6 +14,7 @@ export const upsertGatewaySchema = z.object({
 export const checkoutSchema = z.object({
   planId: z.string().length(24, "Invalid plan id"),
   gatewayProvider: z.enum(["razorpay", "phonepe", "upi", "mock"]),
+  couponCode: z.string().trim().min(1).max(40).optional(),
 });
 
 export const verifyPaymentSchema = z.object({

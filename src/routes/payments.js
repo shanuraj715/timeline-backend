@@ -14,6 +14,16 @@ import { isFeatureEnabled } from "../lib/featureFlags.js";
 import { encryptSecret, decryptSecret, maskSecret, MASK_PREFIX } from "../lib/crypto.js";
 import { createMockOrder } from "../lib/payments/mock.js";
 import { createRazorpayOrder, verifyPaymentSignature, verifyWebhookSignature } from "../lib/payments/razorpay.js";
+import Coupon from "../models/Coupon.js";
+import { resolveCoupon, computeDiscount } from "./coupons.js";
+
+// Redemptions are counted when an order actually gets paid, not at
+// checkout-creation time — an abandoned or failed order shouldn't consume
+// a limited coupon's redemption slot.
+async function incrementCouponRedemption(couponCode) {
+  if (!couponCode) return;
+  await Coupon.updateOne({ code: couponCode }, { $inc: { redemptionCount: 1 } });
+}
 
 export const paymentsRouter = Router();
 export const publicPaymentsRouter = Router();
@@ -148,11 +158,28 @@ paymentsRouter.post(
     const gateway = await PaymentGateway.findOne({ provider: data.gatewayProvider, isEnabled: true });
     if (!gateway) return badRequest(res, "This payment method is not available");
 
+    // Re-resolved server-side even though the pricing page already showed a
+    // preview via /api/coupons/apply — never trust a client-supplied
+    // discount amount.
+    let finalAmount = plan.priceInPaise;
+    let discountAmount = 0;
+    let couponCode = null;
+    if (data.couponCode) {
+      const result = await resolveCoupon(data.couponCode, plan._id.toString());
+      if (!result.ok) return badRequest(res, result.error);
+      discountAmount = computeDiscount(result.coupon, plan.priceInPaise);
+      finalAmount = plan.priceInPaise - discountAmount;
+      couponCode = result.coupon.code;
+    }
+
     const order = await Order.create({
       userId: user._id,
       planId: plan._id,
       gatewayProvider: gateway.provider,
-      amount: plan.priceInPaise,
+      amount: finalAmount,
+      originalAmount: discountAmount > 0 ? plan.priceInPaise : null,
+      couponCode,
+      discountAmount,
       currency: plan.currency,
       credits: plan.credits,
       status: "created",
@@ -160,14 +187,14 @@ paymentsRouter.post(
 
     try {
       if (gateway.provider === "mock") {
-        const mockOrder = createMockOrder({ amount: plan.priceInPaise, currency: plan.currency });
+        const mockOrder = createMockOrder({ amount: finalAmount, currency: plan.currency });
         order.gatewayOrderId = mockOrder.gatewayOrderId;
         await order.save();
         return res.status(201).json({
           orderId: order._id.toString(),
           provider: "mock",
           gatewayOrderId: mockOrder.gatewayOrderId,
-          amount: plan.priceInPaise,
+          amount: finalAmount,
           currency: plan.currency,
         });
       }
@@ -176,7 +203,7 @@ paymentsRouter.post(
         const credentials = decryptCredentials(gateway.credentials);
         const rzOrder = await createRazorpayOrder({
           credentials,
-          amount: plan.priceInPaise,
+          amount: finalAmount,
           currency: plan.currency,
           receipt: order._id.toString(),
         });
@@ -225,6 +252,7 @@ paymentsRouter.post(
     order.gatewayPaymentId = `mock_pay_${order._id}`;
     order.paidAt = new Date();
     await order.save();
+    await incrementCouponRedemption(order.couponCode);
 
     const updatedUser = await User.findByIdAndUpdate(user._id, { $inc: { credits: order.credits } }, { new: true });
     res.json({ ok: true, credits: updatedUser.credits });
@@ -267,6 +295,7 @@ paymentsRouter.post(
     order.gatewayPaymentId = data.razorpayPaymentId;
     order.paidAt = new Date();
     await order.save();
+    await incrementCouponRedemption(order.couponCode);
 
     const updatedUser = await User.findByIdAndUpdate(user._id, { $inc: { credits: order.credits } }, { new: true });
     res.json({ ok: true, credits: updatedUser.credits });
@@ -298,6 +327,7 @@ paymentsRouter.post(
         order.paidAt = new Date();
         order.metadata = { ...order.metadata, webhookEvent: event.event };
         await order.save();
+        await incrementCouponRedemption(order.couponCode);
         await User.findByIdAndUpdate(order.userId, { $inc: { credits: order.credits } });
       }
     }
@@ -321,6 +351,9 @@ paymentsRouter.get(
         plan: o.planId ? { name: o.planId.name, credits: o.planId.credits } : null,
         gatewayProvider: o.gatewayProvider,
         amount: o.amount,
+        originalAmount: o.originalAmount,
+        couponCode: o.couponCode,
+        discountAmount: o.discountAmount,
         currency: o.currency,
         credits: o.credits,
         status: o.status,
