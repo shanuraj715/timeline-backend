@@ -24,6 +24,8 @@ const UserSchema = new Schema(
     lastLoginAt: { type: Date, default: null },
 
     passwordChangedAt: { type: Date, default: null },
+
+    credits: { type: Number, default: 0, min: 0 },
   },
   { timestamps: true }
 );
@@ -39,6 +41,7 @@ UserSchema.methods.toSafeJSON = function toSafeJSON() {
     name: this.name,
     avatarUrl: this.avatarUrl,
     role: this.role,
+    credits: this.credits,
     createdAt: this.createdAt,
   };
 };

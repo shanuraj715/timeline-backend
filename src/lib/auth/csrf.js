@@ -6,16 +6,17 @@
 // Deliberately simpler than double-submit cookie tokens, which would be
 // redundant given the cookie settings already in place.
 //
-// APP_URL must be the FRONTEND's public origin (not this backend's own) —
-// the frontend proxies /api/* here via Next.js rewrites, which forwards the
+// APP_URL/ADMIN_APP_URL must be each frontend's own public origin (not this
+// backend's own) — both proxy /api/* here (Next.js rewrites for the main
+// app, a Vite dev-server proxy for the admin app), which forwards the
 // browser's real Origin/Referer headers through unchanged, so this check
 // keeps working exactly as it did when everything was one Next.js project.
 
 const REQUIRED_HEADER = "x-requested-with";
 const REQUIRED_HEADER_VALUE = "timeline-app";
 
-function getAllowedOrigin() {
-  return process.env.APP_URL || "http://localhost:3000";
+function getAllowedOrigins() {
+  return [process.env.APP_URL || "http://localhost:3000", process.env.ADMIN_APP_URL || "http://localhost:5174"];
 }
 
 export function verifyCsrf(req) {
@@ -25,13 +26,13 @@ export function verifyCsrf(req) {
   const header = req.headers[REQUIRED_HEADER];
   if (header !== REQUIRED_HEADER_VALUE) return false;
 
+  const allowed = getAllowedOrigins();
   const origin = req.headers.origin;
-  const allowed = getAllowedOrigin();
-  if (origin && origin !== allowed) return false;
+  if (origin && !allowed.includes(origin)) return false;
 
   if (!origin) {
     const referer = req.headers.referer;
-    if (referer && !referer.startsWith(allowed)) return false;
+    if (referer && !allowed.some((a) => referer.startsWith(a))) return false;
   }
 
   return true;
