@@ -70,9 +70,13 @@ paymentsRouter.put(
       // A masked value (e.g. "****7890") coming back from the admin UI means
       // "left unchanged" — re-encrypting the mask itself would corrupt the
       // real secret. Only values that don't look like our own mask format
-      // get (re-)encrypted.
+      // get (re-)encrypted. An empty string means "no value" — skipped
+      // entirely rather than encrypted, both because a blank field isn't a
+      // secret worth storing and because encrypting zero bytes produces an
+      // empty ciphertext segment indistinguishable from a malformed value.
       const mergedCredentials = {};
       for (const [key, value] of Object.entries(data.credentials)) {
+        if (!value) continue;
         if (value.startsWith(MASK_PREFIX) && existingCredentials[key]) {
           mergedCredentials[key] = existingCredentials[key];
         } else {
