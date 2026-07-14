@@ -10,6 +10,7 @@ import { cmsRouter, publicCmsRouter } from "./routes/cms.js";
 import { featureFlagsRouter, publicFeatureFlagsRouter } from "./routes/featureFlags.js";
 import { pricingRouter, publicPricingRouter } from "./routes/pricing.js";
 import { paymentsRouter, publicPaymentsRouter } from "./routes/payments.js";
+import { analyticsRouter } from "./routes/analytics.js";
 import { serverError } from "./lib/apiError.js";
 
 const PORT = process.env.PORT || 4000;
@@ -49,6 +50,7 @@ app.use("/api/cms", cmsRouter);
 app.use("/api/feature-flags", featureFlagsRouter);
 app.use("/api/pricing", pricingRouter);
 app.use("/api/payments", paymentsRouter);
+app.use("/api/analytics", analyticsRouter);
 app.use("/api/public", publicCmsRouter);
 app.use("/api/public/feature-flags", publicFeatureFlagsRouter);
 app.use("/api/public/pricing", publicPricingRouter);
