@@ -16,11 +16,10 @@ import ThemeUnlock from "../models/ThemeUnlock.js";
 import TimelineThemeOverride from "../models/TimelineThemeOverride.js";
 import { ensureThemeUnlocked } from "../lib/themeUnlock.js";
 import { serializeTheme } from "./themes.js";
-import StoragePlan from "../models/StoragePlan.js";
 import StoragePurchase from "../models/StoragePurchase.js";
-import { serializeStoragePlan } from "./storagePlans.js";
 import { getPlatformSettings } from "../lib/platformSettings.js";
-import { purchaseStorageSchema } from "../lib/validation/storagePlans.js";
+import { getTimelineStorageQuota } from "../lib/storageQuota.js";
+import { purchaseStorageSchema } from "../lib/validation/storage.js";
 import { createTimelineSchema, updateTimelineSchema, inviteMemberSchema, updateMemberRoleSchema } from "../lib/validation/timeline.js";
 import { setBaseThemeSchema, createOverrideSchema } from "../lib/validation/themes.js";
 import { searchMediaSchema } from "../lib/validation/media.js";
@@ -167,7 +166,6 @@ timelinesRouter.post(
         slug,
         ownerId: user._id,
         themeId: defaultTheme?._id || null,
-        storageQuotaBytes: settings.freeStorageBytesPerTimeline,
       });
 
       await Membership.create({
@@ -896,9 +894,12 @@ timelinesRouter.post(
     if (files.length === 0) return badRequest(res, "No files were provided");
 
     const batchBytes = files.reduce((sum, f) => sum + f.size, 0);
-    const usedBytes = await getTimelineUsedBytes(timeline._id);
-    if (usedBytes + batchBytes > timeline.storageQuotaBytes) {
-      const remaining = Math.max(timeline.storageQuotaBytes - usedBytes, 0);
+    const [usedBytes, quotaBytes] = await Promise.all([
+      getTimelineUsedBytes(timeline._id),
+      getTimelineStorageQuota(timeline),
+    ]);
+    if (usedBytes + batchBytes > quotaBytes) {
+      const remaining = Math.max(quotaBytes - usedBytes, 0);
       return res.status(413).json({
         error: `This timeline has ${formatBytes(remaining)} of storage left, but this upload needs ${formatBytes(
           batchBytes
@@ -1418,16 +1419,15 @@ timelinesRouter.get(
 
     if (!checkPermission("viewTimeline", membership, res)) return;
 
-    const [usedBytes, plans] = await Promise.all([
-      getTimelineUsedBytes(timeline._id),
-      StoragePlan.find({ isActive: true }).sort({ order: 1, bytes: 1 }),
-    ]);
+    const [usedBytes, settings] = await Promise.all([getTimelineUsedBytes(timeline._id), getPlatformSettings()]);
 
     res.json({
       usedBytes,
-      quotaBytes: timeline.storageQuotaBytes,
+      quotaBytes: settings.freeStorageBytesPerTimeline + timeline.purchasedStorageBytes,
+      purchasedBytes: timeline.purchasedStorageBytes,
       canManage: permissions.manageTimelineStorage(membership.role),
-      plans: plans.map(serializeStoragePlan),
+      unitBytes: settings.storageUnitBytes,
+      unitPriceCredits: settings.storageUnitPriceCredits,
     });
   })
 );
@@ -1451,25 +1451,42 @@ timelinesRouter.post(
     if (!data) return;
 
     try {
-      const plan = await StoragePlan.findOne({ _id: data.storagePlanId, isActive: true });
-      if (!plan) return notFound(res, "Storage plan not found");
+      const settings = await getPlatformSettings();
 
-      const freshUser = await User.findById(user._id);
-      if (freshUser.credits < plan.priceCredits) {
-        return badRequest(res, "Not enough credits to buy this storage plan");
+      // The request only ever carries how many bytes are wanted — never a
+      // cost — so there's nothing for a tampered payload to lie about: the
+      // price is always derived here from the *current* rate, and the
+      // amount itself must be an exact whole multiple of that rate's unit
+      // (no buying 101MB when the unit is 100MB).
+      if (data.bytes % settings.storageUnitBytes !== 0) {
+        const nearestValid = Math.max(
+          Math.round(data.bytes / settings.storageUnitBytes) * settings.storageUnitBytes,
+          settings.storageUnitBytes
+        );
+        return badRequest(
+          res,
+          `Storage can only be bought in multiples of ${formatBytes(settings.storageUnitBytes)} — try ${formatBytes(nearestValid)}.`
+        );
       }
 
-      freshUser.credits -= plan.priceCredits;
+      const units = data.bytes / settings.storageUnitBytes;
+      const creditsToSpend = units * settings.storageUnitPriceCredits;
+
+      const freshUser = await User.findById(user._id);
+      if (freshUser.credits < creditsToSpend) {
+        return badRequest(res, `Not enough credits — this costs ${creditsToSpend}, you have ${freshUser.credits}.`);
+      }
+
+      freshUser.credits -= creditsToSpend;
       await freshUser.save();
 
-      timeline.storageQuotaBytes += plan.bytes;
+      timeline.purchasedStorageBytes += data.bytes;
       await timeline.save();
 
       await StoragePurchase.create({
         timelineId: timeline._id,
-        storagePlanId: plan._id,
-        bytesGranted: plan.bytes,
-        creditsSpent: plan.priceCredits,
+        bytesGranted: data.bytes,
+        creditsSpent: creditsToSpend,
         purchasedByUserId: user._id,
       });
 
@@ -1477,13 +1494,18 @@ timelinesRouter.post(
         userId: user._id,
         timelineId: timeline._id,
         action: "timeline_storage_purchased",
-        targetType: "storagePlan",
-        targetId: plan._id,
-        metadata: { bytes: plan.bytes, creditsSpent: plan.priceCredits },
+        targetType: "timeline",
+        targetId: timeline._id,
+        metadata: { bytes: data.bytes, creditsSpent: creditsToSpend },
         ip: clientIp(req),
       });
 
-      res.json({ ok: true, quotaBytes: timeline.storageQuotaBytes, credits: freshUser.credits });
+      res.json({
+        ok: true,
+        quotaBytes: settings.freeStorageBytesPerTimeline + timeline.purchasedStorageBytes,
+        purchasedBytes: timeline.purchasedStorageBytes,
+        credits: freshUser.credits,
+      });
     } catch (err) {
       serverError(res, err, "Failed to purchase storage");
     }

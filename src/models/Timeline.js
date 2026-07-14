@@ -10,12 +10,13 @@ const TimelineSchema = new Schema(
     coverMediaId: { type: Schema.Types.ObjectId, ref: "Media", default: null },
     ownerId: { type: Schema.Types.ObjectId, ref: "User", required: true, index: true },
     themeId: { type: Schema.Types.ObjectId, ref: "Theme", default: null },
-    // Snapshot of PlatformSettings.freeStorageBytesPerTimeline at creation
-    // time, plus every StoragePurchase.bytesGranted since — so a later
-    // admin change to the global default doesn't retroactively resize
-    // existing timelines, same as how a new timeline's theme is whatever
-    // the site default was *at creation time*.
-    storageQuotaBytes: { type: Number, default: 0 },
+    // Only the *purchased* add-on, in bytes — the free portion is never
+    // stored here. A timeline's effective quota is always computed live as
+    // PlatformSettings.freeStorageBytesPerTimeline + purchasedStorageBytes
+    // (see getTimelineStorageQuota() in lib/storageQuota.js), so raising the
+    // site-wide free tier in the admin panel immediately benefits every
+    // timeline that hasn't bought extra space, not just new ones.
+    purchasedStorageBytes: { type: Number, default: 0, min: 0 },
     settings: {
       allowMemberUploads: { type: Boolean, default: true },
       defaultRole: { type: String, enum: ["viewer", "editor"], default: "viewer" },

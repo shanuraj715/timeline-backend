@@ -14,6 +14,8 @@ function serialize(settings) {
     freeStorageBytesPerTimeline: settings.freeStorageBytesPerTimeline,
     freeTimelinesPerAccount: settings.freeTimelinesPerAccount,
     creditsPerExtraTimeline: settings.creditsPerExtraTimeline,
+    storageUnitBytes: settings.storageUnitBytes,
+    storageUnitPriceCredits: settings.storageUnitPriceCredits,
   };
 }
 

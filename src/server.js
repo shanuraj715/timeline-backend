@@ -13,7 +13,6 @@ import { paymentsRouter, publicPaymentsRouter } from "./routes/payments.js";
 import { analyticsRouter } from "./routes/analytics.js";
 import { themesRouter } from "./routes/themes.js";
 import { settingsRouter } from "./routes/settings.js";
-import { storagePlansRouter } from "./routes/storagePlans.js";
 import { couponsRouter } from "./routes/coupons.js";
 import { serverError } from "./lib/apiError.js";
 
@@ -57,7 +56,6 @@ app.use("/api/payments", paymentsRouter);
 app.use("/api/analytics", analyticsRouter);
 app.use("/api/themes", themesRouter);
 app.use("/api/settings", settingsRouter);
-app.use("/api/storage-plans", storagePlansRouter);
 app.use("/api/coupons", couponsRouter);
 app.use("/api/public", publicCmsRouter);
 app.use("/api/public/feature-flags", publicFeatureFlagsRouter);
