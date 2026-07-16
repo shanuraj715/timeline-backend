@@ -103,6 +103,7 @@ emailTemplatesRouter.patch(
 emailTemplatesRouter.post(
   "/:eventKey/preview",
   asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
     const admin = await requireSuperAdmin(req, res);
     if (!admin) return;
 
