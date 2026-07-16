@@ -4,6 +4,13 @@ export const updatePlatformSettingsSchema = z.object({
   freeStorageBytesPerTimeline: z.number().int().min(0).optional(),
   freeTimelinesPerAccount: z.number().int().min(0).optional(),
   creditsPerExtraTimeline: z.number().int().min(0).optional(),
+  defaultCreditsOnSignup: z.number().int().min(0).optional(),
   storageUnitBytes: z.number().int().min(1).optional(),
   storageUnitPriceCredits: z.number().int().min(1).optional(),
+  maintenanceMode: z
+    .object({
+      enabled: z.boolean().optional(),
+      message: z.string().max(500).optional(),
+    })
+    .optional(),
 });

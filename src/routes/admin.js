@@ -15,6 +15,7 @@ import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { getPlatformSettings } from "../lib/platformSettings.js";
 import { getTimelineUsedBytes } from "../lib/storageQuota.js";
+import { sendTemplatedEmail } from "../lib/email/send.js";
 
 export const adminRouter = Router();
 
@@ -74,6 +75,10 @@ adminRouter.get(
         email: u.email,
         role: u.role,
         credits: u.credits,
+        dob: u.dob,
+        gender: u.gender,
+        phone: u.phone,
+        country: u.country,
         isLocked: u.isLocked(),
         lockUntil: u.lockUntil,
         failedLoginAttempts: u.failedLoginAttempts,
@@ -163,6 +168,15 @@ adminRouter.post(
       ip: clientIp(req),
       metadata: { targetUserId: id, amount: data.amount, reason: data.reason, balanceAfter: target.credits },
     });
+
+    // Only on a grant, not a deduction — "credits_added" has nothing
+    // meaningful to say about a balance going down.
+    if (data.amount > 0) {
+      sendTemplatedEmail("credits_added", {
+        user: target,
+        vars: { credits_amount: String(data.amount), credit_reason: data.reason || "" },
+      });
+    }
 
     res.json({ ok: true, credits: target.credits });
   })

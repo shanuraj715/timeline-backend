@@ -1,4 +1,6 @@
 import { Router } from "express";
+import multer from "multer";
+import crypto from "crypto";
 import { connectDB } from "../lib/db/connect.js";
 import NavItem from "../models/NavItem.js";
 import FooterColumn from "../models/FooterColumn.js";
@@ -8,9 +10,50 @@ import { parseJson, badRequest, serverError } from "../lib/apiError.js";
 import { requireSuperAdmin, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
+import { validateMediaFile } from "../lib/media/fileValidation.js";
+import { getStorage } from "../lib/storage/index.js";
+import CmsMedia from "../models/CmsMedia.js";
 
 export const cmsRouter = Router();
 export const publicCmsRouter = Router();
+
+const uploadCmsMedia = multer({ storage: multer.memoryStorage(), limits: { fileSize: 25 * 1024 * 1024 } });
+
+// Flat namespace ("cms-media/<uuid><ext>") rather than page-scoped, since an
+// image/video is embedded inline in a page's rich-text `content` and isn't
+// tied to a single field the way a theme's one background image is — the
+// admin can insert one before the page itself has even been saved. There's
+// no DB record tracking these (unlike Theme.imageKey), so removing an image
+// from a page's content doesn't delete the underlying file — an accepted
+// gap, not a leak: storage isn't public-listable and orphaned files cost
+// nothing but disk space.
+function cmsMediaKey(filename) {
+  return `cms-media/${filename}`;
+}
+
+// No DB record tracks each upload's mime type (see cmsMediaKey's comment),
+// so the read route re-derives Content-Type from the extension baked into
+// the filename at upload time — mirrors validateMediaFile's own allowlist.
+const EXTENSION_MIME = {
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".png": "image/png",
+  ".webp": "image/webp",
+  ".gif": "image/gif",
+  ".heic": "image/heic",
+  ".heif": "image/heif",
+  ".tiff": "image/tiff",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".webm": "video/webm",
+  ".mkv": "video/x-matroska",
+  ".avi": "video/x-msvideo",
+};
+
+function mimeForFilename(filename) {
+  const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+  return EXTENSION_MIME[ext] || "application/octet-stream";
+}
 
 // ---- Nav items (admin) ----
 
@@ -268,6 +311,74 @@ cmsRouter.delete(
     const page = await Page.findByIdAndDelete(req.params.id);
     if (!page) return notFound(res, "Page not found");
     res.json({ ok: true });
+  })
+);
+
+// ---- Page content media (image/video uploads for the rich-text editor) ----
+
+cmsRouter.post(
+  "/media",
+  uploadCmsMedia.single("file"),
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+    const admin = await requireSuperAdmin(req, res);
+    if (!admin) return;
+
+    if (!req.file) return badRequest(res, "No file was provided");
+
+    const validation = await validateMediaFile(req.file.buffer);
+    if (!validation.valid) return badRequest(res, validation.reason || "Unsupported file type");
+
+    const filename = `${crypto.randomUUID()}${validation.extension}`;
+    const key = cmsMediaKey(filename);
+    const storage = await getStorage();
+    await storage.write(key, req.file.buffer);
+
+    await connectDB();
+    await CmsMedia.create({
+      key,
+      filename,
+      mime: validation.mime,
+      type: validation.type,
+      size: req.file.buffer.length,
+      uploadedByUserId: admin._id,
+    });
+
+    res.status(201).json({
+      url: `/api/cms/media/${filename}`,
+      type: validation.type,
+      mime: validation.mime,
+    });
+  })
+);
+
+// Public, unauthenticated by design — same reasoning as themes' background
+// image route: admin-authored page content, not private user media, so it
+// doesn't need the signed-token scheme timeline media files use.
+cmsRouter.get(
+  "/media/:filename",
+  asyncHandler(async (req, res) => {
+    // Filenames are always crypto.randomUUID() + a known extension (see the
+    // upload route) — rejecting anything else closes off path traversal via
+    // this param without needing to sanitize/resolve paths ourselves.
+    if (!/^[0-9a-f-]+\.[a-z0-9]+$/i.test(req.params.filename)) return notFound(res, "File not found");
+
+    const key = cmsMediaKey(req.params.filename);
+    const storage = await getStorage();
+    if (!(await storage.exists(key))) return notFound(res, "File not found");
+
+    try {
+      const { stream, size } = await storage.createReadStream(key, null);
+      res.writeHead(200, {
+        "Content-Type": mimeForFilename(req.params.filename),
+        "Cache-Control": "public, max-age=604800, immutable",
+        "Content-Length": String(size),
+      });
+      stream.pipe(res);
+    } catch (err) {
+      console.error("Failed to stream cms media:", err);
+      notFound(res, "File not found in storage");
+    }
   })
 );
 

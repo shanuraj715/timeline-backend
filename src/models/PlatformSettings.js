@@ -13,12 +13,25 @@ const PlatformSettingsSchema = new Schema(
     freeStorageBytesPerTimeline: { type: Number, default: 256 * 1024 * 1024, min: 0 },
     freeTimelinesPerAccount: { type: Number, default: 2, min: 0 },
     creditsPerExtraTimeline: { type: Number, default: 20, min: 0 },
+    // Credited to every new account at registration — see routes/auth.js's
+    // /register handler. 0 means no signup bonus.
+    defaultCreditsOnSignup: { type: Number, default: 0, min: 0 },
     // A timeline can buy extra storage in whole multiples of this many bytes,
     // each multiple costing storageUnitPriceCredits — e.g. 100MB/10 credits
     // means 300MB costs 30 credits, but 150MB is rejected outright (not a
     // whole multiple). See routes/timelines.js's storage/purchase route.
     storageUnitBytes: { type: Number, default: 100 * 1024 * 1024, min: 1 },
     storageUnitPriceCredits: { type: Number, default: 10, min: 1 },
+    // Read on (almost) every API request via lib/maintenance.js's
+    // in-memory cache, not this document directly — see that file for why.
+    maintenanceMode: {
+      enabled: { type: Boolean, default: false },
+      message: {
+        type: String,
+        default: "We're currently performing scheduled maintenance. We'll be back shortly.",
+        maxlength: 500,
+      },
+    },
   },
   { timestamps: true }
 );
