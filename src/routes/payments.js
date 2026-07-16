@@ -2,6 +2,7 @@ import { Router } from "express";
 import { connectDB } from "../lib/db/connect.js";
 import PaymentGateway from "../models/PaymentGateway.js";
 import PricingPlan from "../models/PricingPlan.js";
+import Currency from "../models/Currency.js";
 import Order from "../models/Order.js";
 import User from "../models/User.js";
 import { upsertGatewaySchema, checkoutSchema, verifyPaymentSchema } from "../lib/validation/payments.js";
@@ -21,6 +22,7 @@ import {
 } from "../lib/payments/razorpay.js";
 import Coupon from "../models/Coupon.js";
 import { resolveCoupon, computeDiscount } from "./coupons.js";
+import { sendTemplatedEmail } from "../lib/email/send.js";
 
 // Redemptions are counted when an order actually gets paid, not at
 // checkout-creation time — an abandoned or failed order shouldn't consume
@@ -28,6 +30,24 @@ import { resolveCoupon, computeDiscount } from "./coupons.js";
 async function incrementCouponRedemption(couponCode) {
   if (!couponCode) return;
   await Coupon.updateOne({ code: couponCode }, { $inc: { redemptionCount: 1 } });
+}
+
+// Called from all three "an order just became paid" paths (mock complete,
+// client-side verify, Razorpay webhook) — `updatedUser` should already
+// reflect the post-credit balance (findByIdAndUpdate with { new: true }) so
+// {total_credit} in the email is accurate.
+async function sendPurchaseCompleteEmail(order, updatedUser) {
+  const plan = await PricingPlan.findById(order.planId).select("name").lean();
+  sendTemplatedEmail("purchase_complete", {
+    user: updatedUser,
+    vars: {
+      plan_name: plan?.name || "Credits",
+      credits_purchased: String(order.credits),
+      amount_paid: (order.amount / 100).toFixed(2),
+      currency: order.currency,
+      order_id: order._id.toString(),
+    },
+  });
 }
 
 export const paymentsRouter = Router();
@@ -160,20 +180,26 @@ paymentsRouter.post(
     const plan = await PricingPlan.findOne({ _id: data.planId, isActive: true });
     if (!plan) return notFound(res, "Plan not found");
 
+    const currency = await Currency.findOne({ code: data.currency, isEnabled: true });
+    if (!currency) return badRequest(res, "This currency is not available");
+
+    const planAmount = plan.prices.get(data.currency);
+    if (planAmount == null) return badRequest(res, "This plan isn't priced in the selected currency");
+
     const gateway = await PaymentGateway.findOne({ provider: data.gatewayProvider, isEnabled: true });
     if (!gateway) return badRequest(res, "This payment method is not available");
 
     // Re-resolved server-side even though the pricing page already showed a
     // preview via /api/coupons/apply — never trust a client-supplied
     // discount amount.
-    let finalAmount = plan.priceInPaise;
+    let finalAmount = planAmount;
     let discountAmount = 0;
     let couponCode = null;
     if (data.couponCode) {
-      const result = await resolveCoupon(data.couponCode, plan._id.toString());
+      const result = await resolveCoupon(data.couponCode, plan._id.toString(), user);
       if (!result.ok) return badRequest(res, result.error);
-      discountAmount = computeDiscount(result.coupon, plan.priceInPaise);
-      finalAmount = plan.priceInPaise - discountAmount;
+      discountAmount = computeDiscount(result.coupon, planAmount);
+      finalAmount = planAmount - discountAmount;
       couponCode = result.coupon.code;
     }
 
@@ -182,17 +208,17 @@ paymentsRouter.post(
       planId: plan._id,
       gatewayProvider: gateway.provider,
       amount: finalAmount,
-      originalAmount: discountAmount > 0 ? plan.priceInPaise : null,
+      originalAmount: discountAmount > 0 ? planAmount : null,
       couponCode,
       discountAmount,
-      currency: plan.currency,
+      currency: data.currency,
       credits: plan.credits,
       status: "created",
     });
 
     try {
       if (gateway.provider === "mock") {
-        const mockOrder = createMockOrder({ amount: finalAmount, currency: plan.currency });
+        const mockOrder = createMockOrder({ amount: finalAmount, currency: data.currency });
         order.gatewayOrderId = mockOrder.gatewayOrderId;
         await order.save();
         return res.status(201).json({
@@ -200,7 +226,7 @@ paymentsRouter.post(
           provider: "mock",
           gatewayOrderId: mockOrder.gatewayOrderId,
           amount: finalAmount,
-          currency: plan.currency,
+          currency: data.currency,
         });
       }
 
@@ -209,7 +235,7 @@ paymentsRouter.post(
         const rzOrder = await createRazorpayOrder({
           credentials,
           amount: finalAmount,
-          currency: plan.currency,
+          currency: data.currency,
           receipt: order._id.toString(),
         });
         order.gatewayOrderId = rzOrder.gatewayOrderId;
@@ -273,6 +299,7 @@ paymentsRouter.post(
     await incrementCouponRedemption(order.couponCode);
 
     const updatedUser = await User.findByIdAndUpdate(user._id, { $inc: { credits: order.credits } }, { new: true });
+    sendPurchaseCompleteEmail(order, updatedUser);
     res.json({ ok: true, credits: updatedUser.credits });
   })
 );
@@ -316,6 +343,7 @@ paymentsRouter.post(
     await incrementCouponRedemption(order.couponCode);
 
     const updatedUser = await User.findByIdAndUpdate(user._id, { $inc: { credits: order.credits } }, { new: true });
+    sendPurchaseCompleteEmail(order, updatedUser);
     res.json({ ok: true, credits: updatedUser.credits });
   })
 );
@@ -346,7 +374,8 @@ paymentsRouter.post(
         order.metadata = { ...order.metadata, webhookEvent: event.event };
         await order.save();
         await incrementCouponRedemption(order.couponCode);
-        await User.findByIdAndUpdate(order.userId, { $inc: { credits: order.credits } });
+        const updatedUser = await User.findByIdAndUpdate(order.userId, { $inc: { credits: order.credits } }, { new: true });
+        sendPurchaseCompleteEmail(order, updatedUser);
       }
     }
 

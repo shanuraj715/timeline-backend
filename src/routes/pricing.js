@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { connectDB } from "../lib/db/connect.js";
 import PricingPlan from "../models/PricingPlan.js";
+import Currency from "../models/Currency.js";
 import { createPricingPlanSchema, updatePricingPlanSchema } from "../lib/validation/pricing.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
 import { requireSuperAdmin, notFound } from "../lib/auth/guards.js";
@@ -9,6 +10,30 @@ import { asyncHandler } from "../lib/asyncHandler.js";
 
 export const pricingRouter = Router();
 export const publicPricingRouter = Router();
+
+// Every plan must carry a price for every currency that currently exists
+// (enabled or not) — the admin form always renders one input per currency,
+// so in normal use this never fires, but it keeps the invariant honest
+// against direct API calls too.
+async function validatePricesCoverage(prices, res) {
+  const currencies = await Currency.find({}, "code");
+  const knownCodes = new Set(currencies.map((c) => c.code));
+  const givenCodes = Object.keys(prices);
+
+  const missing = [...knownCodes].filter((code) => !givenCodes.includes(code));
+  if (missing.length > 0) {
+    badRequest(res, `Missing price for: ${missing.join(", ")}`);
+    return false;
+  }
+
+  const unknown = givenCodes.filter((code) => !knownCodes.has(code));
+  if (unknown.length > 0) {
+    badRequest(res, `Unknown currency: ${unknown.join(", ")}`);
+    return false;
+  }
+
+  return true;
+}
 
 pricingRouter.get(
   "/",
@@ -35,6 +60,7 @@ pricingRouter.post(
       await connectDB();
       const existing = await PricingPlan.findOne({ slug: data.slug });
       if (existing) return badRequest(res, "A plan with this slug already exists");
+      if (!(await validatePricesCoverage(data.prices, res))) return;
 
       const plan = await PricingPlan.create(data);
       res.status(201).json({ plan });
@@ -61,6 +87,7 @@ pricingRouter.patch(
         const existing = await PricingPlan.findOne({ slug: data.slug, _id: { $ne: req.params.id } });
         if (existing) return badRequest(res, "A plan with this slug already exists");
       }
+      if (data.prices && !(await validatePricesCoverage(data.prices, res))) return;
 
       const plan = await PricingPlan.findByIdAndUpdate(req.params.id, { $set: data }, { new: true });
       if (!plan) return notFound(res, "Pricing plan not found");
@@ -90,7 +117,12 @@ publicPricingRouter.get(
   "/",
   asyncHandler(async (req, res) => {
     await connectDB();
-    const plans = await PricingPlan.find({ isActive: true }).sort({ order: 1, createdAt: 1 });
+    const [plans, enabledCurrencies] = await Promise.all([
+      PricingPlan.find({ isActive: true }).sort({ order: 1, createdAt: 1 }),
+      Currency.find({ isEnabled: true }, "code"),
+    ]);
+    const enabledCodes = new Set(enabledCurrencies.map((c) => c.code));
+
     res.json({
       plans: plans.map((p) => ({
         id: p._id.toString(),
@@ -98,8 +130,7 @@ publicPricingRouter.get(
         slug: p.slug,
         description: p.description,
         credits: p.credits,
-        priceInPaise: p.priceInPaise,
-        currency: p.currency,
+        prices: Object.fromEntries([...p.prices].filter(([code]) => enabledCodes.has(code))),
         isFeatured: p.isFeatured,
       })),
     });

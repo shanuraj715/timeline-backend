@@ -15,7 +15,17 @@ import { themesRouter } from "./routes/themes.js";
 import { settingsRouter } from "./routes/settings.js";
 import { couponsRouter } from "./routes/coupons.js";
 import { recaptchaRouter, publicRecaptchaRouter } from "./routes/recaptcha.js";
+import { storageRouter } from "./routes/storage.js";
+import { publicMaintenanceRouter } from "./routes/maintenance.js";
+import { emailTemplatesRouter } from "./routes/emailTemplates.js";
+import { emailProvidersRouter } from "./routes/emailProviders.js";
+import { googleOAuthRouter, publicGoogleOAuthRouter } from "./routes/googleOAuth.js";
+import { currencyRouter, publicCurrencyRouter } from "./routes/currency.js";
 import { serverError } from "./lib/apiError.js";
+import { maintenanceGate } from "./lib/maintenanceGate.js";
+import { bootstrapDefaultProvider } from "./lib/storage/index.js";
+import { startStorageWorker } from "./lib/storage/worker.js";
+import { bootstrapEmailTemplates } from "./lib/email/bootstrap.js";
 
 const PORT = process.env.PORT || 4000;
 
@@ -45,6 +55,13 @@ app.get("/api/health", (req, res) => {
   res.json({ ok: true, service: "timeline-backend" });
 });
 
+// Mounted before every other route so a maintenance-mode block always wins;
+// the gate itself allowlists /api/auth, /api/health, and
+// /api/public/maintenance (registered right below) so those keep working
+// regardless — see lib/maintenanceGate.js for the full reasoning.
+app.use(maintenanceGate());
+app.use("/api/public/maintenance", publicMaintenanceRouter);
+
 app.use("/api/auth", authRouter);
 app.use("/api/admin", adminRouter);
 app.use("/api/timelines", timelinesRouter);
@@ -59,11 +76,18 @@ app.use("/api/themes", themesRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/coupons", couponsRouter);
 app.use("/api/recaptcha", recaptchaRouter);
+app.use("/api/storage", storageRouter);
+app.use("/api/email-templates", emailTemplatesRouter);
+app.use("/api/email-providers", emailProvidersRouter);
+app.use("/api/google-oauth", googleOAuthRouter);
+app.use("/api/currencies", currencyRouter);
 app.use("/api/public", publicCmsRouter);
 app.use("/api/public/feature-flags", publicFeatureFlagsRouter);
 app.use("/api/public/pricing", publicPricingRouter);
 app.use("/api/public/payment-gateways", publicPaymentsRouter);
 app.use("/api/public/recaptcha", publicRecaptchaRouter);
+app.use("/api/public/google-oauth", publicGoogleOAuthRouter);
+app.use("/api/public/currencies", publicCurrencyRouter);
 
 // Catches anything forwarded via asyncHandler's `.catch(next)` from any
 // route that didn't already handle its own errors — the equivalent of the
@@ -72,6 +96,12 @@ app.use("/api/public/recaptcha", publicRecaptchaRouter);
 app.use((err, req, res, next) => {
   serverError(res, err, "Something went wrong");
 });
+
+bootstrapDefaultProvider()
+  .then(() => startStorageWorker())
+  .catch((err) => console.error("Failed to bootstrap default storage provider:", err));
+
+bootstrapEmailTemplates().catch((err) => console.error("Failed to bootstrap email templates:", err));
 
 app.listen(PORT, () => {
   console.log(`timeline-backend listening on http://localhost:${PORT}`);

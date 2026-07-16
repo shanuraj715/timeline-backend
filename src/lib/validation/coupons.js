@@ -70,4 +70,5 @@ export const updateCouponSchema = z
 export const applyCouponSchema = z.object({
   code: z.string().trim().min(1).max(40),
   planId: z.string().length(24),
+  currency: z.string().trim().toUpperCase().length(3),
 });

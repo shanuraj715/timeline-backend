@@ -165,14 +165,17 @@ couponsRouter.post(
     const plan = await PricingPlan.findOne({ _id: data.planId, isActive: true });
     if (!plan) return notFound(res, "Plan not found");
 
+    const planAmount = plan.prices.get(data.currency);
+    if (planAmount == null) return badRequest(res, "This plan isn't priced in the selected currency");
+
     const result = await resolveCoupon(data.code, data.planId, user);
     if (!result.ok) return badRequest(res, result.error);
 
-    const discountAmount = computeDiscount(result.coupon, plan.priceInPaise);
+    const discountAmount = computeDiscount(result.coupon, planAmount);
     res.json({
       valid: true,
       discountAmount,
-      finalAmount: plan.priceInPaise - discountAmount,
+      finalAmount: planAmount - discountAmount,
     });
   })
 );

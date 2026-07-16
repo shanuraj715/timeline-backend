@@ -8,13 +8,17 @@ const PricingPlanSchema = new Schema(
     slug: { type: String, required: true, unique: true, lowercase: true, trim: true, index: true },
     description: { type: String, trim: true, maxlength: 500, default: "" },
     credits: { type: Number, required: true, min: 1 },
-    priceInPaise: { type: Number, required: true, min: 0 }, // smallest currency unit (paise for INR)
-    currency: { type: String, default: "INR", uppercase: true, trim: true, maxlength: 3 },
+    // Keyed by ISO 4217 currency code, values in that currency's smallest
+    // unit (paise for INR, cents for USD, ...). One entry per currency that
+    // has ever existed in the Currency collection, enabled or not — see
+    // routes/currency.js, which keeps this invariant true whenever a
+    // currency is created or deleted.
+    prices: { type: Map, of: Number, default: {} },
     isActive: { type: Boolean, default: true, index: true },
     isFeatured: { type: Boolean, default: false },
     order: { type: Number, default: 0, index: true },
   },
-  { timestamps: true }
+  { timestamps: true, toJSON: { flattenMaps: true }, toObject: { flattenMaps: true } }
 );
 
 export default models.PricingPlan || model("PricingPlan", PricingPlanSchema);
