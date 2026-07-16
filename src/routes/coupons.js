@@ -4,8 +4,9 @@ import Coupon from "../models/Coupon.js";
 import PricingPlan from "../models/PricingPlan.js";
 import { createCouponSchema, updateCouponSchema, applyCouponSchema } from "../lib/validation/coupons.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, getCurrentUser, unauthorized, notFound } from "../lib/auth/guards.js";
+import { requireSuperAdmin, getCurrentUser, unauthorized, notFound, clientIp } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
+import { rateLimit } from "../lib/auth/rateLimit.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 
 export const couponsRouter = Router();
@@ -157,6 +158,13 @@ couponsRouter.post(
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
     const user = await getCurrentUser(req);
     if (!user) return unauthorized(res);
+
+    // Unlike login/register, this is authenticated-only, but still scriptable
+    // against a wordlist of guessed codes with no throttle otherwise — a
+    // coupon's existence/discount is real value worth protecting the same
+    // way credential-guessing endpoints already are.
+    const { allowed } = rateLimit(`coupon-apply:${clientIp(req)}`, { limit: 15, windowMs: 15 * 60 * 1000 });
+    if (!allowed) return badRequest(res, "Too many attempts. Please try again later.");
 
     const data = parseJson(req, res, applyCouponSchema);
     if (!data) return;
