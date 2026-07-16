@@ -12,7 +12,17 @@ const UserSchema = new Schema(
       trim: true,
       index: true,
     },
-    passwordHash: { type: String, required: true },
+    // Not `required` — a Google-only account (see routes/auth.js's
+    // /google/callback) has no local password at all. Both places that
+    // verify a password (/login, /change-password) guard against a null
+    // hash explicitly rather than calling bcrypt.compare against it.
+    passwordHash: { type: String, default: null },
+    // Google's `sub` claim — set the moment an account signs in with
+    // Google, whether that's a brand-new account or linking to an
+    // existing password account with the same (Google-verified) email.
+    // sparse so any number of accounts with no Google link can all have
+    // googleId: null without violating the unique index.
+    googleId: { type: String, default: null, index: true, sparse: true, unique: true },
     // `name` is derived (`${firstName} ${lastName}`) at creation and kept
     // as the single source of truth every other read site already uses
     // (admin lists, activity/order/timeline serializers, email template
