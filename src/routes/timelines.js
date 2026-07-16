@@ -38,6 +38,7 @@ import { logActivity } from "../lib/logger.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { signMediaToken } from "../lib/auth/mediaToken.js";
 import { serializeMedia } from "../lib/media/serialize.js";
+import { sendTemplatedEmail } from "../lib/email/send.js";
 import { canAssignRole, permissions } from "../lib/rbac/permissions.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { isFeatureEnabled } from "../lib/featureFlags.js";
@@ -47,7 +48,7 @@ import { extractImageExif } from "../lib/media/exif.js";
 import { generateImageDerivatives } from "../lib/media/thumbnail.js";
 import { dayKeyFor } from "../lib/media/dayKey.js";
 import { syncDaySummary } from "../lib/media/daySummary.js";
-import { storage, buildStorageKey } from "../lib/storage/index.js";
+import { getStorage, buildStorageKey } from "../lib/storage/index.js";
 
 export const timelinesRouter = Router();
 
@@ -715,13 +716,25 @@ timelinesRouter.post(
         ip: clientIp(req),
       });
 
+      const inviteUrl = `${process.env.APP_URL || ""}/invite/${invitation.token}`;
+      sendTemplatedEmail("invitation", {
+        to: invitation.email,
+        vars: {
+          inviter_name: user.name,
+          timeline_title: timeline.title,
+          invite_role: invitation.role,
+          invite_url: inviteUrl,
+          invite_expiry_days: String(Math.round(INVITE_TTL_MS / (24 * 60 * 60 * 1000))),
+        },
+      });
+
       res.status(201).json({
         invitation: {
           id: invitation._id.toString(),
           email: invitation.email,
           role: invitation.role,
           expiresAt: invitation.expiresAt,
-          inviteUrl: `${process.env.APP_URL || ""}/invite/${invitation.token}`,
+          inviteUrl,
         },
       });
     } catch (err) {
@@ -970,6 +983,7 @@ async function processOneUpload({ file, clientDate, timeline, userId, ip }) {
     extension: validation.extension,
     variant: "original",
   });
+  const storage = await getStorage();
   await storage.write(originalKey, buffer);
 
   const baseDoc = {

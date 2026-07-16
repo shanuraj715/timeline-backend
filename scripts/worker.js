@@ -21,7 +21,11 @@ import Media from "../src/models/Media.js";
 import Timeline from "../src/models/Timeline.js";
 import Membership from "../src/models/Membership.js";
 import DaySummary from "../src/models/DaySummary.js";
-import { storage, buildStorageKey } from "../src/lib/storage/index.js";
+import Invitation from "../src/models/Invitation.js";
+import ThemeUnlock from "../src/models/ThemeUnlock.js";
+import TimelineThemeOverride from "../src/models/TimelineThemeOverride.js";
+import StoragePurchase from "../src/models/StoragePurchase.js";
+import { getStorage, buildStorageKey } from "../src/lib/storage/index.js";
 import { probeVideo, extractVideoFrame } from "../src/lib/media/video.js";
 import { generateImageDerivatives } from "../src/lib/media/thumbnail.js";
 import { syncDaySummary } from "../src/lib/media/daySummary.js";
@@ -52,6 +56,7 @@ async function processVideo(media) {
   const tempPath = path.join(os.tmpdir(), `${randomUUID()}${path.extname(media.storageKey) || ".mp4"}`);
 
   try {
+    const storage = await getStorage();
     const original = await storage.read(media.storageKey);
     await fs.writeFile(tempPath, original);
 
@@ -111,7 +116,9 @@ async function videoProcessingTick() {
 async function purgeExpiredMedia() {
   const cutoff = new Date(Date.now() - TRASH_RETENTION_MS);
   const expired = await Media.find({ deletedAt: { $ne: null, $lt: cutoff } });
+  if (expired.length === 0) return;
 
+  const storage = await getStorage();
   for (const media of expired) {
     await Promise.allSettled(
       [media.storageKey, media.thumbnailKey, media.previewKey]
@@ -120,13 +127,20 @@ async function purgeExpiredMedia() {
     );
     await Media.deleteOne({ _id: media._id });
   }
-  if (expired.length) console.log(`[worker] purged ${expired.length} trashed media item(s)`);
+  console.log(`[worker] purged ${expired.length} trashed media item(s)`);
 }
 
+// Every model with a timelineId gets cleaned up here except ActivityLog —
+// that one is left alone deliberately, as an audit trail: it should still
+// be possible to answer "who deleted timeline X and when" after the
+// timeline itself is gone, the same way a security log isn't expected to
+// erase its own history just because the thing it logged no longer exists.
 async function purgeExpiredTimelines() {
   const cutoff = new Date(Date.now() - TRASH_RETENTION_MS);
   const expired = await Timeline.find({ deletedAt: { $ne: null, $lt: cutoff } });
+  if (expired.length === 0) return;
 
+  const storage = await getStorage();
   for (const timeline of expired) {
     const mediaItems = await Media.find({ timelineId: timeline._id });
     for (const media of mediaItems) {
@@ -139,6 +153,10 @@ async function purgeExpiredTimelines() {
     await Media.deleteMany({ timelineId: timeline._id });
     await DaySummary.deleteMany({ timelineId: timeline._id });
     await Membership.deleteMany({ timelineId: timeline._id });
+    await Invitation.deleteMany({ timelineId: timeline._id });
+    await ThemeUnlock.deleteMany({ timelineId: timeline._id });
+    await TimelineThemeOverride.deleteMany({ timelineId: timeline._id });
+    await StoragePurchase.deleteMany({ timelineId: timeline._id });
     await Timeline.deleteOne({ _id: timeline._id });
     console.log(`[worker] permanently purged timeline ${timeline._id}`);
   }

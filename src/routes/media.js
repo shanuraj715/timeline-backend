@@ -12,7 +12,7 @@ import { signMediaToken } from "../lib/auth/mediaToken.js";
 import { serializeMedia } from "../lib/media/serialize.js";
 import { logActivity } from "../lib/logger.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
-import { storage } from "../lib/storage/index.js";
+import { getStorage } from "../lib/storage/index.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 
 export const mediaRouter = Router();
@@ -115,6 +115,7 @@ mediaRouter.delete(
 
     try {
       if (alreadyTrashed) {
+        const storage = await getStorage();
         await Promise.all(
           [media.storageKey, media.thumbnailKey, media.previewKey]
             .filter(Boolean)
@@ -182,6 +183,7 @@ mediaRouter.get(
     const storageKey = variant === "preview" && media.previewKey ? media.previewKey : media.storageKey;
     const contentType = variant === "preview" ? "image/webp" : media.mimeType;
 
+    const storage = await getStorage();
     if (!(await storage.exists(storageKey))) return notFound(res, "File not found in storage");
 
     const rangeHeader = req.headers.range;
@@ -228,6 +230,7 @@ mediaRouter.get(
     if (!media.thumbnailKey) return notFound(res, "Thumbnail not ready yet");
 
     try {
+      const storage = await getStorage();
       const { stream, size } = await storage.createReadStream(media.thumbnailKey, null);
 
       res.writeHead(200, {
