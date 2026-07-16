@@ -53,6 +53,15 @@ async function sendPurchaseCompleteEmail(order, updatedUser) {
 export const paymentsRouter = Router();
 export const publicPaymentsRouter = Router();
 
+// The mock gateway grants credits with no real payment — safe for local/
+// test use, but a real financial-abuse risk if it's ever left enabled on a
+// production deployment (whether by an admin's mistake or a compromised
+// admin account). Hard-blocked here regardless of the admin `isEnabled`
+// toggle, as a backstop beyond just remembering to keep it off.
+function mockGatewayAllowed() {
+  return process.env.NODE_ENV !== "production";
+}
+
 const KNOWN_PROVIDERS = ["razorpay", "phonepe", "upi", "mock"];
 
 function decryptCredentials(encryptedCredentials = {}) {
@@ -218,6 +227,12 @@ paymentsRouter.post(
 
     try {
       if (gateway.provider === "mock") {
+        if (!mockGatewayAllowed()) {
+          order.status = "failed";
+          await order.save();
+          return badRequest(res, "This payment method is not available");
+        }
+
         const mockOrder = createMockOrder({ amount: finalAmount, currency: data.currency });
         order.gatewayOrderId = mockOrder.gatewayOrderId;
         await order.save();
@@ -278,6 +293,7 @@ paymentsRouter.post(
   "/mock/:orderId/complete",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+    if (!mockGatewayAllowed()) return badRequest(res, "This payment method is not available");
 
     const user = await getCurrentUser(req);
     if (!user) return unauthorized(res);
