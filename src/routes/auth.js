@@ -606,6 +606,15 @@ authRouter.post(
       const otpDoc = await PasswordResetOtp.findOne({ userId: user._id, consumedAt: null });
       if (!otpDoc) return badRequest(res, "Invalid or expired code");
 
+      // Expiry is also enforced by a Mongo TTL index on this collection, but
+      // TTL cleanup runs on a periodic background sweep, not instantly at
+      // the exact expiry moment — this closes the gap where a code could
+      // still be accepted briefly after it should already be dead.
+      if (otpDoc.expiresAt < new Date()) {
+        await otpDoc.deleteOne();
+        return badRequest(res, "Invalid or expired code");
+      }
+
       if (otpDoc.attempts >= OTP_MAX_ATTEMPTS) {
         await otpDoc.deleteOne();
         return badRequest(res, "Too many incorrect attempts. Please request a new code.");
