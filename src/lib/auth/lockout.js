@@ -10,6 +10,12 @@ const THRESHOLDS = [
   { attempts: 5, lockMs: 15 * 60 * 1000, level: 1 },
 ];
 
+/**
+ * Returns { user, justLocked }. `justLocked` is true only on the exact call
+ * that crosses a new threshold (5th/10th/20th failed attempt) — used by the
+ * login route to send an account_locked email once per lock, not on every
+ * subsequent failed attempt while already locked.
+ */
 export async function recordFailedLogin(user) {
   user.failedLoginAttempts += 1;
 
@@ -20,7 +26,7 @@ export async function recordFailedLogin(user) {
   }
 
   await user.save();
-  return user;
+  return { user, justLocked: Boolean(hit) };
 }
 
 export async function recordSuccessfulLogin(user) {

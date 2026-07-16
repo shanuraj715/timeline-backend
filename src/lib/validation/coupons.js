@@ -2,6 +2,26 @@ import { z } from "zod";
 
 const codePattern = /^[A-Z0-9_-]+$/;
 
+const accountAgeRuleSchema = z
+  .object({
+    type: z.enum(["none", "relative", "absolute"]).default("none"),
+    relativeDays: z.number().int().min(1).nullable().default(null),
+    startDate: z.coerce.date().nullable().default(null),
+    endDate: z.coerce.date().nullable().default(null),
+  })
+  .refine((r) => r.type !== "relative" || r.relativeDays, {
+    message: "Enter the number of days",
+    path: ["relativeDays"],
+  })
+  .refine((r) => r.type !== "absolute" || (r.startDate && r.endDate), {
+    message: "Enter both a start and end date",
+    path: ["startDate"],
+  })
+  .refine((r) => r.type !== "absolute" || !r.startDate || !r.endDate || r.startDate <= r.endDate, {
+    message: "Start date must be before end date",
+    path: ["endDate"],
+  });
+
 export const createCouponSchema = z
   .object({
     code: z
@@ -17,6 +37,7 @@ export const createCouponSchema = z
     isActive: z.boolean().default(true),
     expiresAt: z.coerce.date().nullable().default(null),
     maxRedemptions: z.number().int().min(1).nullable().default(null),
+    accountAgeRule: accountAgeRuleSchema.default({ type: "none", relativeDays: null, startDate: null, endDate: null }),
   })
   .refine((data) => data.type !== "percentage" || data.value <= 100, {
     message: "A percentage discount can't exceed 100",
@@ -38,6 +59,7 @@ export const updateCouponSchema = z
     isActive: z.boolean(),
     expiresAt: z.coerce.date().nullable(),
     maxRedemptions: z.number().int().min(1).nullable(),
+    accountAgeRule: accountAgeRuleSchema,
   })
   .partial()
   .refine((data) => data.type !== "percentage" || !data.value || data.value <= 100, {

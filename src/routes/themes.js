@@ -10,7 +10,7 @@ import { requireSuperAdmin, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { validateMediaFile } from "../lib/media/fileValidation.js";
-import { storage } from "../lib/storage/index.js";
+import { getStorage } from "../lib/storage/index.js";
 
 export const themesRouter = Router();
 
@@ -28,6 +28,19 @@ export function serializeTheme(theme) {
     imagePosition: theme.imagePosition,
     overlayStyle: theme.overlayStyle,
     overlayOpacity: theme.overlayOpacity,
+    glassEffect: theme.glassEffect,
+    glassBlur: theme.glassBlur,
+    particleEffect: theme.particleEffect,
+    particleCount: theme.particleCount,
+    particleSpeed: theme.particleSpeed,
+    particleMinSize: theme.particleMinSize,
+    particleMaxSize: theme.particleMaxSize,
+    particleInteractive: theme.particleInteractive,
+    particleInteractionStrength: theme.particleInteractionStrength,
+    nodeShape: theme.nodeShape,
+    nodeBorderWidth: theme.nodeBorderWidth,
+    nodeSize: theme.nodeSize,
+    edgeStyle: theme.edgeStyle,
     priceCredits: theme.priceCredits,
     status: theme.status,
     isDefault: theme.isDefault,
@@ -167,11 +180,35 @@ themesRouter.post(
     }
 
     const imageKey = `theme-assets/${theme._id}/image${validation.extension}`;
+    const storage = await getStorage();
     await storage.write(imageKey, req.file.buffer);
 
     theme.imageKey = imageKey;
     theme.imageMimeType = validation.mime;
     await theme.save();
+
+    res.json({ theme: serializeTheme(theme) });
+  })
+);
+
+themesRouter.delete(
+  "/:id/image",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+    const admin = await requireSuperAdmin(req, res);
+    if (!admin) return;
+
+    await connectDB();
+    const theme = await Theme.findById(req.params.id);
+    if (!theme) return notFound(res, "Theme not found");
+
+    if (theme.imageKey) {
+      const storage = await getStorage();
+      await storage.remove(theme.imageKey).catch(() => {});
+      theme.imageKey = null;
+      theme.imageMimeType = null;
+      await theme.save();
+    }
 
     res.json({ theme: serializeTheme(theme) });
   })
@@ -186,6 +223,7 @@ themesRouter.get(
     await connectDB();
     const theme = await Theme.findById(req.params.id);
     if (!theme || !theme.imageKey) return notFound(res, "Image not found");
+    const storage = await getStorage();
     if (!(await storage.exists(theme.imageKey))) return notFound(res, "Image not found in storage");
 
     try {

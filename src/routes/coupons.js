@@ -21,6 +21,12 @@ function serializeCoupon(coupon) {
     expiresAt: coupon.expiresAt,
     maxRedemptions: coupon.maxRedemptions,
     redemptionCount: coupon.redemptionCount,
+    accountAgeRule: {
+      type: coupon.accountAgeRule?.type || "none",
+      relativeDays: coupon.accountAgeRule?.relativeDays ?? null,
+      startDate: coupon.accountAgeRule?.startDate ?? null,
+      endDate: coupon.accountAgeRule?.endDate ?? null,
+    },
     createdAt: coupon.createdAt,
     updatedAt: coupon.updatedAt,
   };
@@ -29,8 +35,10 @@ function serializeCoupon(coupon) {
 // Shared by /apply here (a checkout preview) and payments.js's actual
 // checkout route (which must re-run this itself — never trust a
 // client-supplied discount) — one place defines what makes a coupon valid
-// for a given plan, and how much it's worth.
-export async function resolveCoupon(code, planId) {
+// for a given plan, and how much it's worth. `user` is required (not
+// optional) precisely because of the accountAgeRule check below — a coupon
+// can't be resolved without knowing whose account is redeeming it.
+export async function resolveCoupon(code, planId, user) {
   const coupon = await Coupon.findOne({ code: code.trim().toUpperCase() });
   if (!coupon) return { ok: false, error: "Invalid coupon code" };
   if (!coupon.isActive) return { ok: false, error: "This coupon is no longer active" };
@@ -41,6 +49,19 @@ export async function resolveCoupon(code, planId) {
   if (coupon.applicablePlanIds.length > 0 && !coupon.applicablePlanIds.some((id) => id.toString() === planId)) {
     return { ok: false, error: "This coupon isn't valid for the selected plan" };
   }
+
+  const rule = coupon.accountAgeRule;
+  if (rule?.type === "relative") {
+    const cutoff = new Date(Date.now() - rule.relativeDays * 24 * 60 * 60 * 1000);
+    if (user.createdAt < cutoff) {
+      return { ok: false, error: `This coupon is only valid for accounts created in the last ${rule.relativeDays} days` };
+    }
+  } else if (rule?.type === "absolute") {
+    if (user.createdAt < rule.startDate || user.createdAt > rule.endDate) {
+      return { ok: false, error: "This coupon isn't valid for your account" };
+    }
+  }
+
   return { ok: true, coupon };
 }
 
@@ -144,7 +165,7 @@ couponsRouter.post(
     const plan = await PricingPlan.findOne({ _id: data.planId, isActive: true });
     if (!plan) return notFound(res, "Plan not found");
 
-    const result = await resolveCoupon(data.code, data.planId);
+    const result = await resolveCoupon(data.code, data.planId, user);
     if (!result.ok) return badRequest(res, result.error);
 
     const discountAmount = computeDiscount(result.coupon, plan.priceInPaise);
