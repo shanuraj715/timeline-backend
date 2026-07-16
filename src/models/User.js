@@ -20,9 +20,16 @@ const UserSchema = new Schema(
     // Google's `sub` claim — set the moment an account signs in with
     // Google, whether that's a brand-new account or linking to an
     // existing password account with the same (Google-verified) email.
-    // sparse so any number of accounts with no Google link can all have
-    // googleId: null without violating the unique index.
-    googleId: { type: String, default: null, index: true, sparse: true, unique: true },
+    // No `default` (deliberately, not an oversight) — a sparse unique index
+    // only excludes documents where the field is truly *absent*, not ones
+    // where it's explicitly `null`. A `default: null` here would make every
+    // non-Google account explicitly set googleId to null on creation, and
+    // the very first one would then permanently occupy the index's one
+    // allowed "null" slot — every account created after that would fail
+    // to register at all with a duplicate-key error. Leaving the field
+    // genuinely unset for non-Google accounts is what makes "any number of
+    // accounts with no Google link" actually true.
+    googleId: { type: String, index: true, sparse: true, unique: true },
     // `name` is derived (`${firstName} ${lastName}`) at creation and kept
     // as the single source of truth every other read site already uses
     // (admin lists, activity/order/timeline serializers, email template
