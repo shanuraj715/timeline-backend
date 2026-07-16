@@ -4,6 +4,7 @@ import mongoose from "mongoose";
 import { ZodError } from "zod";
 import { customAlphabet } from "nanoid";
 import { connectDB } from "../lib/db/connect.js";
+import { escapeRegex } from "../lib/escapeRegex.js";
 import Timeline from "../models/Timeline.js";
 import Membership from "../models/Membership.js";
 import Media from "../models/Media.js";
@@ -1162,10 +1163,6 @@ timelinesRouter.get(
     });
   })
 );
-
-function escapeRegex(value) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
 
 timelinesRouter.get(
   "/:slug/trash",

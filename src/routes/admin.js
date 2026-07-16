@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { connectDB } from "../lib/db/connect.js";
+import { escapeRegex } from "../lib/escapeRegex.js";
 import User from "../models/User.js";
 import Timeline from "../models/Timeline.js";
 import Membership from "../models/Membership.js";
@@ -57,7 +58,7 @@ adminRouter.get(
     const limit = Math.min(Number(req.query.limit) || 20, 100);
 
     const query = q
-      ? { $or: [{ name: { $regex: q, $options: "i" } }, { email: { $regex: q, $options: "i" } }] }
+      ? { $or: [{ name: { $regex: escapeRegex(q), $options: "i" } }, { email: { $regex: escapeRegex(q), $options: "i" } }] }
       : {};
 
     const [users, total] = await Promise.all([
@@ -244,7 +245,7 @@ adminRouter.get(
     const page = Math.max(Number(req.query.page) || 1, 1);
     const limit = Math.min(Number(req.query.limit) || 20, 100);
 
-    const query = { deletedAt: null, ...(q ? { title: { $regex: q, $options: "i" } } : {}) };
+    const query = { deletedAt: null, ...(q ? { title: { $regex: escapeRegex(q), $options: "i" } } : {}) };
     const [timelines, total] = await Promise.all([
       Timeline.find(query)
         .sort({ createdAt: -1 })
@@ -419,14 +420,12 @@ adminRouter.get(
       query.action = req.query.action.trim();
     }
     if (typeof req.query.ip === "string" && req.query.ip.trim()) {
-      query.ip = { $regex: req.query.ip.trim(), $options: "i" };
+      query.ip = { $regex: escapeRegex(req.query.ip.trim()), $options: "i" };
     }
     if (typeof req.query.userEmail === "string" && req.query.userEmail.trim()) {
+      const emailSearch = escapeRegex(req.query.userEmail.trim());
       const matchingUsers = await User.find({
-        $or: [
-          { name: { $regex: req.query.userEmail.trim(), $options: "i" } },
-          { email: { $regex: req.query.userEmail.trim(), $options: "i" } },
-        ],
+        $or: [{ name: { $regex: emailSearch, $options: "i" } }, { email: { $regex: emailSearch, $options: "i" } }],
       }).select("_id");
       // No match still needs to produce an empty result set, not "no filter" —
       // an id no real ActivityLog row will ever have.
