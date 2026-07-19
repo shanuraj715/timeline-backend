@@ -5,6 +5,7 @@ import { ZodError } from "zod";
 import { customAlphabet } from "nanoid";
 import { connectDB } from "../lib/db/connect.js";
 import { escapeRegex } from "../lib/escapeRegex.js";
+import { rateLimit } from "../lib/auth/rateLimit.js";
 import Timeline from "../models/Timeline.js";
 import Membership from "../models/Membership.js";
 import Media from "../models/Media.js";
@@ -35,6 +36,8 @@ import {
   clientIp,
 } from "../lib/auth/guards.js";
 import { generateUniqueSlug } from "../lib/slug.js";
+import { purgeTimeline } from "../lib/timelinePurge.js";
+import { TRASH_RETENTION_MS } from "../lib/trashRetention.js";
 import { logActivity } from "../lib/logger.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { signMediaToken } from "../lib/auth/mediaToken.js";
@@ -54,8 +57,6 @@ import { getStorage, buildStorageKey } from "../lib/storage/index.js";
 export const timelinesRouter = Router();
 
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_SIZE_MB || 500) * 1024 * 1024;
-// Generous headroom over a single file's limit for a multi-file batch request.
-const MAX_BATCH_BYTES = MAX_UPLOAD_BYTES * 10;
 const upload = multer({ storage: multer.memoryStorage() });
 
 const tokenId = customAlphabet("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 32);
@@ -69,17 +70,43 @@ timelinesRouter.get(
 
     await connectDB();
 
+    // Every membership row is needed just to know which timelines are this
+    // account's at all — cheap even at a few thousand rows (indexed, tiny
+    // documents, no populate). What must NOT scale with that count is
+    // everything below: search/sort/pagination happens in the Timeline
+    // query itself, and the per-timeline aggregates (media count, cover
+    // fallback) only ever run over the current page's ids, not the whole
+    // set — a dashboard with 500+ timelines (owned, or shared to one
+    // person by many different owners) still does the same fixed amount of
+    // work per request as one with 5.
     const memberships = await Membership.find({ userId: user._id, status: "active" }).lean();
     const timelineIds = memberships.map((m) => m.timelineId);
     const roleByTimeline = new Map(memberships.map((m) => [m.timelineId.toString(), m.role]));
 
-    const timelines = await Timeline.find({ _id: { $in: timelineIds }, deletedAt: null })
-      .populate("coverMediaId")
-      .sort({ updatedAt: -1 })
-      .lean();
+    const q = typeof req.query.q === "string" ? req.query.q.trim() : "";
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 24, 1), 100);
 
+    const query = {
+      _id: { $in: timelineIds },
+      deletedAt: null,
+      ...(q ? { title: { $regex: escapeRegex(q), $options: "i" } } : {}),
+    };
+
+    const [timelines, total] = await Promise.all([
+      Timeline.find(query)
+        .populate("coverMediaId")
+        .populate("ownerId", "name email")
+        .sort({ updatedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Timeline.countDocuments(query),
+    ]);
+
+    const pageIds = timelines.map((t) => t._id);
     const counts = await Media.aggregate([
-      { $match: { timelineId: { $in: timelineIds }, deletedAt: null } },
+      { $match: { timelineId: { $in: pageIds }, deletedAt: null } },
       { $group: { _id: "$timelineId", count: { $sum: 1 } } },
     ]);
     const countByTimeline = new Map(counts.map((c) => [c._id.toString(), c.count]));
@@ -118,10 +145,17 @@ timelinesRouter.get(
             : null,
           role: roleByTimeline.get(t._id.toString()),
           mediaCount: countByTimeline.get(t._id.toString()) || 0,
+          // Only meaningful for a shared (non-owner) card, but cheap enough
+          // to always include rather than conditioning the populate/shape
+          // on role — the frontend decides whether to render it.
+          owner: t.ownerId ? { name: t.ownerId.name, email: t.ownerId.email } : null,
           createdAt: t.createdAt,
           updatedAt: t.updatedAt,
         };
       }),
+      page,
+      pageCount: Math.max(Math.ceil(total / limit), 1),
+      total,
     });
   })
 );
@@ -200,6 +234,145 @@ timelinesRouter.post(
       });
     } catch (err) {
       serverError(res, err, "Failed to create timeline");
+    }
+  })
+);
+
+// A dedicated, cheap count — CreateTimelineDialog needs "how many timelines
+// do I own" to show an accurate "this will cost N credits" hint before
+// submit, and fetching the (paginated) full list just for a count would
+// either be wrong past the first page or defeat the point of paginating.
+// The real enforcement is still POST /'s own fresh count server-side; this
+// is only ever a pre-submit UI hint.
+timelinesRouter.get(
+  "/owned-count",
+  asyncHandler(async (req, res) => {
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    await connectDB();
+    const count = await Timeline.countDocuments({ ownerId: user._id, deletedAt: null });
+    res.json({ count });
+  })
+);
+
+// ---- Timeline trash (registered before GET /:slug so the literal path
+// "/trash" isn't swallowed by that single-segment wildcard route) ----
+
+timelinesRouter.get(
+  "/trash",
+  asyncHandler(async (req, res) => {
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    await connectDB();
+    // Only the owner can delete/restore a timeline (rbac's deleteTimeline
+    // permission is owner-only), so trash is scoped to what this account
+    // owns — a non-owner member never sees a deleted timeline here even if
+    // they used to be a member of it.
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const limit = Math.min(Math.max(Number(req.query.limit) || 24, 1), 100);
+    const query = { ownerId: user._id, deletedAt: { $ne: null } };
+
+    const [timelines, total] = await Promise.all([
+      Timeline.find(query)
+        .sort({ deletedAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(limit)
+        .lean(),
+      Timeline.countDocuments(query),
+    ]);
+
+    const pageIds = timelines.map((t) => t._id);
+    const counts = await Media.aggregate([
+      { $match: { timelineId: { $in: pageIds } } },
+      { $group: { _id: "$timelineId", count: { $sum: 1 } } },
+    ]);
+    const countByTimeline = new Map(counts.map((c) => [c._id.toString(), c.count]));
+
+    res.json({
+      timelines: timelines.map((t) => ({
+        id: t._id.toString(),
+        title: t.title,
+        slug: t.slug,
+        mediaCount: countByTimeline.get(t._id.toString()) || 0,
+        deletedAt: t.deletedAt,
+        purgeAt: new Date(t.deletedAt.getTime() + TRASH_RETENTION_MS),
+      })),
+      page,
+      pageCount: Math.max(Math.ceil(total / limit), 1),
+      total,
+    });
+  })
+);
+
+timelinesRouter.post(
+  "/:id/restore",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { id } = req.params;
+    await connectDB();
+    const timeline = await Timeline.findOne({ _id: id, deletedAt: { $ne: null } });
+    if (!timeline) return notFound(res, "Timeline not found in trash");
+    if (!timeline.ownerId.equals(user._id)) {
+      return forbidden(res, "Only the owner can restore this timeline");
+    }
+
+    try {
+      timeline.deletedAt = null;
+      await timeline.save();
+
+      await logActivity({
+        userId: user._id,
+        timelineId: timeline._id,
+        action: "timeline_restored",
+        targetType: "timeline",
+        targetId: timeline._id,
+        ip: clientIp(req),
+      });
+
+      res.json({ ok: true });
+    } catch (err) {
+      serverError(res, err, "Failed to restore timeline");
+    }
+  })
+);
+
+timelinesRouter.delete(
+  "/:id/permanent",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { id } = req.params;
+    await connectDB();
+    const timeline = await Timeline.findOne({ _id: id, deletedAt: { $ne: null } });
+    if (!timeline) return notFound(res, "Timeline not found in trash");
+    if (!timeline.ownerId.equals(user._id)) {
+      return forbidden(res, "Only the owner can permanently delete this timeline");
+    }
+
+    try {
+      await logActivity({
+        userId: user._id,
+        timelineId: timeline._id,
+        action: "timeline_purged",
+        targetType: "timeline",
+        targetId: timeline._id,
+        ip: clientIp(req),
+      });
+
+      await purgeTimeline(timeline);
+
+      res.json({ ok: true });
+    } catch (err) {
+      serverError(res, err, "Failed to permanently delete timeline");
     }
   })
 );
@@ -317,6 +490,10 @@ timelinesRouter.delete(
     if (!checkPermission("deleteTimeline", membership, res)) return;
 
     try {
+      // Soft-delete only — the owner can restore this from the dashboard's
+      // Trash view (GET /trash, POST /:id/restore below) any time in the
+      // next 30 days. scripts/worker.js's nightly sweep is what actually
+      // erases the files and every timelineId-scoped record if nobody does.
       timeline.deletedAt = new Date();
       await timeline.save();
 
@@ -632,6 +809,68 @@ timelinesRouter.delete(
   })
 );
 
+// The permission (permissions.transferOwnership, owner-only) already
+// existed, but nothing ever called it — an owner who wanted to hand off a
+// timeline (or needed to, to satisfy /api/auth/delete-account's "transfer
+// ownership first" requirement) had no route to do it through.
+timelinesRouter.post(
+  "/:slug/transfer-ownership",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    const newOwnerUserId = req.body?.newOwnerUserId;
+    if (!newOwnerUserId || typeof newOwnerUserId !== "string") {
+      return badRequest(res, "newOwnerUserId is required");
+    }
+
+    await connectDB();
+    const { timeline, membership: actorMembership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !actorMembership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("transferOwnership", actorMembership, res)) return;
+
+    if (newOwnerUserId === user._id.toString()) {
+      return badRequest(res, "You already own this timeline");
+    }
+
+    const target = await Membership.findOne({ timelineId: timeline._id, userId: newOwnerUserId, status: "active" });
+    if (!target) return badRequest(res, "That person must already be an active member of this timeline");
+
+    try {
+      // Not wrapped in a Mongo transaction (no replica-set requirement
+      // elsewhere in this app) — sequential saves in the order that leaves
+      // the timeline in the most recoverable state if one fails midway: the
+      // new owner is promoted first, so a failure after that still leaves
+      // two owners (recoverable/idempotent-retryable) rather than zero.
+      target.role = "owner";
+      await target.save();
+
+      actorMembership.role = "admin";
+      await actorMembership.save();
+
+      timeline.ownerId = target.userId;
+      await timeline.save();
+
+      await logActivity({
+        userId: user._id,
+        timelineId: timeline._id,
+        action: "timeline_ownership_transferred",
+        targetType: "user",
+        targetId: target.userId,
+        ip: clientIp(req),
+      });
+
+      res.json({ ok: true });
+    } catch (err) {
+      serverError(res, err, "Failed to transfer ownership");
+    }
+  })
+);
+
 timelinesRouter.get(
   "/:slug/invitations",
   asyncHandler(async (req, res) => {
@@ -678,6 +917,14 @@ timelinesRouter.post(
     if (!(await isFeatureEnabled("invitations_enabled"))) {
       return res.status(403).json({ error: "Invitations are temporarily disabled", code: "FEATURE_DISABLED" });
     }
+
+    // Nothing previously stopped an editor/admin member from scripting an
+    // invite-spam flood against arbitrary email addresses — this is the one
+    // mutating, externally-visible-effect (an email lands in someone's
+    // inbox) endpoint any member with inviteMembers can hit, so it's keyed
+    // per-account rather than per-IP.
+    const { allowed } = rateLimit(`invite-send:${user._id}`, { limit: 20, windowMs: 10 * 60 * 1000 });
+    if (!allowed) return badRequest(res, "Too many invitations sent recently. Please try again later.");
 
     const data = parseJson(req, res, inviteMemberSchema);
     if (!data) return;
@@ -854,23 +1101,52 @@ timelinesRouter.get(
   })
 );
 
-function checkBatchContentLength(req, res, next) {
-  // Reject oversized requests by their declared Content-Length before
-  // multer buffers the whole multipart body into memory — the per-file size
-  // check inside processOneUpload runs too late to prevent that. (A reverse
+function checkUploadContentLength(req, res, next) {
+  // Reject an oversized request by its declared Content-Length before
+  // multer buffers the whole multipart body into memory — the size check
+  // inside processOneUpload runs too late to prevent that. (A reverse
   // proxy in front of this app should enforce its own body-size cap too —
   // see README — since Content-Length can be omitted or spoofed.)
   const declaredLength = Number(req.headers["content-length"] || 0);
-  if (declaredLength > MAX_BATCH_BYTES) {
-    return res.status(413).json({ error: "Upload batch is too large", code: "PAYLOAD_TOO_LARGE" });
+  if (declaredLength > MAX_UPLOAD_BYTES) {
+    return res.status(413).json({ error: "File is too large", code: "PAYLOAD_TOO_LARGE" });
   }
   next();
 }
 
+// Declaring `upload.single("file")` directly as route middleware means a
+// malformed multipart body (wrong field name, truncated boundary — a flaky
+// mobile network mangling the request, or a stale cached frontend bundle
+// still sending the old "files" field name from before this endpoint
+// became single-file) throws a MulterError that skips straight past this
+// route's own try/catch to server.js's generic fallback handler as a bare,
+// unhelpful 500. Invoking it manually with its own callback catches that
+// error right here instead, as a clean 400.
+function handleSingleFileUpload(req, res, next) {
+  upload.single("file")(req, res, (err) => {
+    if (!err) return next();
+    if (err instanceof multer.MulterError) {
+      return res.status(400).json({ error: "Invalid upload request", code: "BAD_REQUEST" });
+    }
+    next(err);
+  });
+}
+
+// One file per request, sent one at a time — not a multi-file batch. This
+// used to accept an array and process it with bounded concurrency, but a
+// single file's own failure (a corrupt upload, a storage write error, an
+// EXIF/thumbnail crash — none of processOneUpload's steps besides image
+// thumbnailing were wrapped in their own try/catch) threw past the
+// concurrency pool uncaught, past this handler, and into Express's generic
+// error middleware as a bare 500 — for the *entire* batch, silently losing
+// the results of every other file in it that had already succeeded. One
+// file per request means one failure only ever affects that one file, and
+// the try/catch below turns it into a clean, specific error response
+// instead of an opaque 500.
 timelinesRouter.post(
   "/:slug/media",
-  checkBatchContentLength,
-  upload.array("files"),
+  checkUploadContentLength,
+  handleSingleFileUpload,
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
 
@@ -890,48 +1166,38 @@ timelinesRouter.post(
       return res.status(403).json({ error: "Uploads are temporarily disabled", code: "FEATURE_DISABLED" });
     }
 
-    const files = req.files || [];
-    if (files.length === 0) return badRequest(res, "No files were provided");
+    const { allowed } = rateLimit(`media-upload:${user._id}`, { limit: 60, windowMs: 10 * 60 * 1000 });
+    if (!allowed) return badRequest(res, "Too many upload requests recently. Please try again in a few minutes.");
 
-    const batchBytes = files.reduce((sum, f) => sum + f.size, 0);
+    const file = req.file;
+    if (!file) return badRequest(res, "No file was provided");
+
     const [usedBytes, quotaBytes] = await Promise.all([
       getTimelineUsedBytes(timeline._id),
       getTimelineStorageQuota(timeline),
     ]);
-    if (usedBytes + batchBytes > quotaBytes) {
+    if (usedBytes + file.size > quotaBytes) {
       const remaining = Math.max(quotaBytes - usedBytes, 0);
       return res.status(413).json({
-        error: `This timeline has ${formatBytes(remaining)} of storage left, but this upload needs ${formatBytes(
-          batchBytes
+        error: `This timeline has ${formatBytes(remaining)} of storage left, but this file needs ${formatBytes(
+          file.size
         )}. Buy more storage to continue.`,
         code: "STORAGE_QUOTA_EXCEEDED",
       });
     }
 
-    let clientDates = [];
     try {
-      clientDates = JSON.parse(req.body.clientDates || "[]");
-    } catch {
-      clientDates = [];
+      const result = await processOneUpload({
+        file,
+        clientDate: req.body.clientDate,
+        timeline,
+        userId: user._id,
+        ip: clientIp(req),
+      });
+      res.status(201).json({ result });
+    } catch (err) {
+      serverError(res, err, "Failed to upload file");
     }
-
-    const ip = clientIp(req);
-    const results = [];
-
-    for (let i = 0; i < files.length; i++) {
-      const file = files[i];
-      results.push(
-        await processOneUpload({
-          file,
-          clientDate: clientDates[i],
-          timeline,
-          userId: user._id,
-          ip,
-        })
-      );
-    }
-
-    res.status(201).json({ results });
   })
 );
 
@@ -957,6 +1223,8 @@ async function processOneUpload({ file, clientDate, timeline, userId, ip }) {
 
   let captureDate = null;
   let captureDateSource = "upload";
+  let exifLocation = null;
+  let exifCamera = null;
 
   if (validation.type === "image") {
     const exif = await extractImageExif(buffer);
@@ -964,6 +1232,11 @@ async function processOneUpload({ file, clientDate, timeline, userId, ip }) {
       captureDate = exif.captureDate;
       captureDateSource = "exif";
     }
+    // Previously extracted and then silently discarded — gps/camera were
+    // computed here but never attached to the created Media doc, so every
+    // photo with real GPS/camera EXIF data lost it on upload.
+    if (exif.gps) exifLocation = { name: "", lat: exif.gps.lat, lng: exif.gps.lng };
+    if (exif.camera) exifCamera = exif.camera;
   }
   if (!captureDate && clientDate) {
     const parsed = new Date(clientDate);
@@ -1000,6 +1273,8 @@ async function processOneUpload({ file, clientDate, timeline, userId, ip }) {
     captureDate,
     captureDateSource,
     dayKey,
+    ...(exifLocation ? { location: exifLocation } : {}),
+    ...(exifCamera ? { camera: exifCamera } : {}),
   };
 
   let media;
@@ -1469,16 +1744,29 @@ timelinesRouter.post(
       const units = data.bytes / settings.storageUnitBytes;
       const creditsToSpend = units * settings.storageUnitPriceCredits;
 
-      const freshUser = await User.findById(user._id);
-      if (freshUser.credits < creditsToSpend) {
-        return badRequest(res, `Not enough credits — this costs ${creditsToSpend}, you have ${freshUser.credits}.`);
+      // Atomic debit: the $gte guard makes the balance check and the
+      // deduction a single operation, closing the race where two concurrent
+      // purchases (e.g. a double-click) could both read a sufficient
+      // balance before either write lands and both succeed in overdrawing
+      // the account.
+      const updatedUser = await User.findOneAndUpdate(
+        { _id: user._id, credits: { $gte: creditsToSpend } },
+        { $inc: { credits: -creditsToSpend } },
+        { new: true }
+      );
+      if (!updatedUser) {
+        const freshUser = await User.findById(user._id);
+        return badRequest(
+          res,
+          `Not enough credits — this costs ${creditsToSpend}, you have ${freshUser?.credits ?? 0}.`
+        );
       }
 
-      freshUser.credits -= creditsToSpend;
-      await freshUser.save();
-
-      timeline.purchasedStorageBytes += data.bytes;
-      await timeline.save();
+      const updatedTimeline = await Timeline.findByIdAndUpdate(
+        timeline._id,
+        { $inc: { purchasedStorageBytes: data.bytes } },
+        { new: true }
+      );
 
       await StoragePurchase.create({
         timelineId: timeline._id,
@@ -1499,9 +1787,9 @@ timelinesRouter.post(
 
       res.json({
         ok: true,
-        quotaBytes: settings.freeStorageBytesPerTimeline + timeline.purchasedStorageBytes,
-        purchasedBytes: timeline.purchasedStorageBytes,
-        credits: freshUser.credits,
+        quotaBytes: settings.freeStorageBytesPerTimeline + updatedTimeline.purchasedStorageBytes,
+        purchasedBytes: updatedTimeline.purchasedStorageBytes,
+        credits: updatedUser.credits,
       });
     } catch (err) {
       serverError(res, err, "Failed to purchase storage");

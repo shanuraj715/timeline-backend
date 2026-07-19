@@ -12,7 +12,7 @@ import {
   deleteOrphanFilesSchema,
 } from "../lib/validation/storageProviders.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, notFound } from "../lib/auth/guards.js";
+import { requirePermission, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { encryptSecret, decryptSecret, maskSecret, MASK_PREFIX } from "../lib/crypto.js";
@@ -70,7 +70,7 @@ function serializeJob(j) {
 storageRouter.get(
   "/providers",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
     await connectDB();
     const providers = await StorageProvider.find({}).sort({ createdAt: 1 });
@@ -82,7 +82,7 @@ storageRouter.post(
   "/providers",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
 
     const data = parseJson(req, res, createStorageProviderSchema);
@@ -107,7 +107,7 @@ storageRouter.patch(
   "/providers/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
 
     const data = parseJson(req, res, updateStorageProviderSchema);
@@ -136,7 +136,7 @@ storageRouter.delete(
   "/providers/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
 
     await connectDB();
@@ -160,7 +160,7 @@ storageRouter.post(
   "/providers/:id/recalculate",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
 
     await connectDB();
@@ -200,7 +200,7 @@ storageRouter.post(
   "/providers/:id/activate",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
 
     const data = parseJson(req, res, activateProviderSchema);
@@ -259,7 +259,7 @@ storageRouter.post(
 storageRouter.get(
   "/jobs/active",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
     await connectDB();
     const job = await StorageJob.findOne({ status: NON_TERMINAL }).sort({ startedAt: -1 });
@@ -270,7 +270,7 @@ storageRouter.get(
 storageRouter.get(
   "/jobs",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
     await connectDB();
     const jobs = await StorageJob.find({}).sort({ startedAt: -1 }).limit(50);
@@ -281,7 +281,7 @@ storageRouter.get(
 storageRouter.get(
   "/jobs/:id",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
     await connectDB();
     const job = await StorageJob.findById(req.params.id);
@@ -294,7 +294,7 @@ storageRouter.post(
   "/jobs/:id/cancel",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
 
     await connectDB();
@@ -317,7 +317,7 @@ storageRouter.post(
   "/orphan-scan",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
 
     const data = parseJson(req, res, orphanScanSchema);
@@ -351,7 +351,7 @@ storageRouter.post(
 storageRouter.get(
   "/orphan-scan/latest",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
     await connectDB();
     const job = await StorageJob.findOne({ type: "orphan_scan" }).sort({ startedAt: -1 });
@@ -363,7 +363,7 @@ storageRouter.post(
   "/orphan-files/delete",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.storage");
     if (!admin) return;
 
     const data = parseJson(req, res, deleteOrphanFilesSchema);

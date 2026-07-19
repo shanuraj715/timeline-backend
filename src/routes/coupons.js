@@ -4,7 +4,7 @@ import Coupon from "../models/Coupon.js";
 import PricingPlan from "../models/PricingPlan.js";
 import { createCouponSchema, updateCouponSchema, applyCouponSchema } from "../lib/validation/coupons.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, getCurrentUser, unauthorized, notFound, clientIp } from "../lib/auth/guards.js";
+import { requirePermission, getCurrentUser, unauthorized, notFound, clientIp } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { rateLimit } from "../lib/auth/rateLimit.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
@@ -77,7 +77,7 @@ export function computeDiscount(coupon, priceInPaise) {
 couponsRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.coupons");
     if (!admin) return;
     await connectDB();
     const coupons = await Coupon.find({}).sort({ createdAt: -1 });
@@ -89,7 +89,7 @@ couponsRouter.post(
   "/",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.coupons");
     if (!admin) return;
 
     const data = parseJson(req, res, createCouponSchema);
@@ -113,7 +113,7 @@ couponsRouter.patch(
   "/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.coupons");
     if (!admin) return;
 
     const data = parseJson(req, res, updateCouponSchema);
@@ -140,7 +140,7 @@ couponsRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.coupons");
     if (!admin) return;
 
     await connectDB();

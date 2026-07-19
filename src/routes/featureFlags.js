@@ -3,7 +3,7 @@ import { connectDB } from "../lib/db/connect.js";
 import FeatureFlag from "../models/FeatureFlag.js";
 import { createFeatureFlagSchema, updateFeatureFlagSchema } from "../lib/validation/featureFlags.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, notFound } from "../lib/auth/guards.js";
+import { requirePermission, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 
@@ -13,7 +13,7 @@ export const publicFeatureFlagsRouter = Router();
 featureFlagsRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.flags");
     if (!admin) return;
     await connectDB();
     const flags = await FeatureFlag.find({}).sort({ key: 1 });
@@ -25,7 +25,7 @@ featureFlagsRouter.post(
   "/",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.flags");
     if (!admin) return;
 
     const data = parseJson(req, res, createFeatureFlagSchema);
@@ -46,7 +46,7 @@ featureFlagsRouter.patch(
   "/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.flags");
     if (!admin) return;
 
     const data = parseJson(req, res, updateFeatureFlagSchema);
@@ -63,7 +63,7 @@ featureFlagsRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.flags");
     if (!admin) return;
 
     await connectDB();

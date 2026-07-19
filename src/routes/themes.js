@@ -6,7 +6,7 @@ import Timeline from "../models/Timeline.js";
 import TimelineThemeOverride from "../models/TimelineThemeOverride.js";
 import { createThemeSchema, updateThemeSchema } from "../lib/validation/themes.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, notFound } from "../lib/auth/guards.js";
+import { requirePermission, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { validateMediaFile } from "../lib/media/fileValidation.js";
@@ -53,7 +53,7 @@ export function serializeTheme(theme) {
 themesRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.themes");
     if (!admin) return;
     await connectDB();
     const themes = await Theme.find({}).sort({ order: 1, createdAt: -1 });
@@ -65,7 +65,7 @@ themesRouter.post(
   "/",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.themes");
     if (!admin) return;
 
     const data = parseJson(req, res, createThemeSchema);
@@ -89,7 +89,7 @@ themesRouter.patch(
   "/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.themes");
     if (!admin) return;
 
     const data = parseJson(req, res, updateThemeSchema);
@@ -116,7 +116,7 @@ themesRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.themes");
     if (!admin) return;
 
     await connectDB();
@@ -144,7 +144,7 @@ themesRouter.post(
   "/:id/set-default",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.themes");
     if (!admin) return;
 
     await connectDB();
@@ -165,7 +165,7 @@ themesRouter.post(
   upload.single("image"),
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.themes");
     if (!admin) return;
 
     await connectDB();
@@ -195,7 +195,7 @@ themesRouter.delete(
   "/:id/image",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.themes");
     if (!admin) return;
 
     await connectDB();

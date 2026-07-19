@@ -18,6 +18,7 @@ export function serializeMedia(item, token) {
     title: item.title,
     description: item.description,
     location: item.location,
+    camera: item.camera,
     favorite: item.favorite,
     tags: item.tags,
     people: item.people,

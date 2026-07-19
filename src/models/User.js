@@ -53,7 +53,17 @@ const UserSchema = new Schema(
     phone: { type: String, trim: true, default: null },
     country: { type: String, trim: true, default: null },
     avatarUrl: { type: String, default: null },
-    role: { type: String, enum: ["user", "superadmin"], default: "user" },
+    // "admin" is a limited-permission tier — see lib/permissions.js for the
+    // full key catalog and lib/auth/guards.js's requirePermission() for how
+    // it's enforced. "superadmin" is a fixed, singular, non-grantable status
+    // (implicitly holds every permission) — there's no API path that ever
+    // sets this value; it only ever comes from scripts/seedSuperAdmin.js.
+    role: { type: String, enum: ["user", "admin", "superadmin"], default: "user" },
+    // Only meaningful when role === "admin" — ignored for "user" (no admin
+    // access at all) and "superadmin" (implicitly has everything). A flat
+    // array of keys rather than a Mongoose enum on each element so adding a
+    // new permission later never needs a schema migration.
+    permissions: { type: [String], default: [] },
 
     // Progressive brute-force lockout state.
     failedLoginAttempts: { type: Number, default: 0 },
@@ -62,6 +72,30 @@ const UserSchema = new Schema(
     lastLoginAt: { type: Date, default: null },
 
     passwordChangedAt: { type: Date, default: null },
+
+    // Platform-level moderation, distinct from the per-account lockout above
+    // (which is a temporary, self-clearing brute-force defense) — a ban is
+    // deliberate, admin-issued, and stays until an admin reverses it. Checked
+    // at login (routes/auth.js) and on every authenticated request
+    // (lib/auth/guards.js's getCurrentUser), not just at login, so banning
+    // someone mid-session takes effect immediately rather than waiting for
+    // their access token to expire.
+    banned: { type: Boolean, default: false },
+    bannedAt: { type: Date, default: null },
+    bannedReason: { type: String, default: null },
+
+    // Google accounts are marked verified immediately at creation (Google's
+    // own email_verified claim was already checked in /google/callback) —
+    // only password signups ever go through the token flow below. Nothing
+    // in the app currently blocks on this being false; it's surfaced to the
+    // frontend (toSafeJSON) so it can show a "verify your email" banner,
+    // and it closes the account-enumeration-adjacent gap where anyone could
+    // previously register — and get a fully active session — under an
+    // email address they don't actually control, with zero proof of
+    // ownership ever required.
+    emailVerified: { type: Boolean, default: false },
+    emailVerificationTokenHash: { type: String, default: null, index: true },
+    emailVerificationExpiresAt: { type: Date, default: null },
 
     credits: { type: Number, default: 0, min: 0 },
   },
@@ -89,8 +123,18 @@ UserSchema.methods.toSafeJSON = function toSafeJSON() {
     country: this.country,
     avatarUrl: this.avatarUrl,
     role: this.role,
+    permissions: this.permissions,
+    emailVerified: this.emailVerified,
     credits: this.credits,
     createdAt: this.createdAt,
+    // Google signup (see routes/auth.js's /google/callback) can't collect
+    // dob/gender the way registerSchema does for password signups — this
+    // tells the frontend to route a Google-linked account through
+    // /complete-profile until it has both. Scoped to googleId specifically
+    // so it never fires for legacy password accounts that predate the
+    // dob/gender requirement (those were never asked and aren't being
+    // retroactively forced to answer now).
+    needsProfileCompletion: Boolean(this.googleId) && !(this.dob && this.gender),
   };
 };
 

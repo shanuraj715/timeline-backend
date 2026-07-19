@@ -81,6 +81,29 @@ ${CARD_CLOSE}`,
 <p>If this wasn't you, consider resetting your password once it unlocks.</p>
 ${CARD_CLOSE}`,
   },
+  {
+    eventKey: "verify_email",
+    name: "Verify your email",
+    description: "Sent right after a password-based account registers, to confirm they own the email address.",
+    subject: "Confirm your {site_name} email address",
+    bodyHtml: `${CARD_OPEN}
+<h2 style="margin:0 0 16px;">Confirm your email</h2>
+<p>Hi {fname}, please confirm that <strong>{email}</strong> is yours to finish setting up your {site_name} account.</p>
+<p><a href="{verify_url}" style="display:inline-block;margin-top:12px;padding:10px 20px;background:#0a84ff;color:#fff;border-radius:999px;text-decoration:none;">Confirm email address</a></p>
+<p style="font-size:12px;color:#6e6e73;">This link expires in {verify_expiry_hours} hours. If you didn't create this account, you can safely ignore this email.</p>
+${CARD_CLOSE}`,
+  },
+  {
+    eventKey: "security_alert",
+    name: "Security alert",
+    description: "Sent when a sensitive account change happens (password changed or reset), as an out-of-band signal in case it wasn't the account owner.",
+    subject: "Your {site_name} password was just changed",
+    bodyHtml: `${CARD_OPEN}
+<h2 style="margin:0 0 16px;">Your password was changed</h2>
+<p>Hi {fname}, this confirms the password on your {site_name} account (<strong>{email}</strong>) was just changed{security_alert_context}. All other sessions were signed out.</p>
+<p><strong>If you didn't make this change</strong>, reset your password immediately and contact support.</p>
+${CARD_CLOSE}`,
+  },
 ];
 
 export const EVENT_KEY_VALUES = EVENT_KEYS.map((e) => e.eventKey);

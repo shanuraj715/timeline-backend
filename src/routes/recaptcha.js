@@ -3,7 +3,7 @@ import { connectDB } from "../lib/db/connect.js";
 import { getRecaptchaSettings, updateRecaptchaSettings } from "../lib/recaptchaSettings.js";
 import { updateRecaptchaSettingsSchema } from "../lib/validation/recaptcha.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, clientIp } from "../lib/auth/guards.js";
+import { requirePermission, clientIp } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { logSecurityEvent } from "../lib/logger.js";
@@ -27,7 +27,7 @@ function serialize(settings) {
 recaptchaRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.settings");
     if (!admin) return;
 
     await connectDB();
@@ -40,7 +40,7 @@ recaptchaRouter.put(
   "/",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.settings");
     if (!admin) return;
 
     const data = parseJson(req, res, updateRecaptchaSettingsSchema);

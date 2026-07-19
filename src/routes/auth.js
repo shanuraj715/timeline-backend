@@ -8,6 +8,7 @@ import PasswordResetOtp from "../models/PasswordResetOtp.js";
 import {
   loginSchema,
   registerSchema,
+  completeProfileSchema,
   changePasswordSchema,
   deleteAccountSchema,
   forgotPasswordSchema,
@@ -15,6 +16,8 @@ import {
 } from "../lib/validation/auth.js";
 import Timeline from "../models/Timeline.js";
 import Membership from "../models/Membership.js";
+import Order from "../models/Order.js";
+import ActivityLog from "../models/ActivityLog.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
 import { verifyPassword, hashPassword } from "../lib/auth/password.js";
 import { signAccessToken } from "../lib/auth/jwt.js";
@@ -44,6 +47,24 @@ export const authRouter = Router();
 
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes, matches otp_expiry_minutes below
 const OTP_MAX_ATTEMPTS = 5;
+const VERIFY_EMAIL_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Shared by /register and /resend-verification. Never awaited by its
+// callers on the hot path (registration shouldn't block on outbound email
+// delivery) — same fire-and-forget convention as every other
+// sendTemplatedEmail call site in this file.
+async function issueEmailVerification(user) {
+  const token = crypto.randomBytes(32).toString("base64url");
+  user.emailVerificationTokenHash = hashToken(token);
+  user.emailVerificationExpiresAt = new Date(Date.now() + VERIFY_EMAIL_TTL_MS);
+  await user.save();
+
+  const verifyUrl = `${process.env.APP_URL || ""}/verify-email/${token}`;
+  sendTemplatedEmail("verify_email", {
+    user,
+    vars: { verify_url: verifyUrl, verify_expiry_hours: String(VERIFY_EMAIL_TTL_MS / 3600000) },
+  });
+}
 
 const GOOGLE_STATE_COOKIE = "tl_google_state";
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -53,7 +74,29 @@ const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
 const GOOGLE_JWKS = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
 
 function googleRedirectUri() {
+  // Always the main app's domain, registered as-is in Google's console —
+  // deliberately NOT branched per `app` below. Google only needs this
+  // callback URL to match something it has on file; it's this handler's own
+  // response that decides which app's origin the browser ultimately lands
+  // back on, so the admin panel's "Sign in with Google" button reuses this
+  // exact same redirect_uri instead of requiring a second one to be
+  // registered with Google for the admin domain too.
   return `${process.env.APP_URL || "http://localhost:3000"}/api/auth/google/callback`;
+}
+
+// "app" travels through Google's own `state` round-trip (appended after the
+// random CSRF value, verified byte-for-byte against the cookie same as
+// before) so the callback below knows whether this login started from the
+// main app's login/register page or the admin panel's — they need
+// different outcomes: the main app can silently create a new account,
+// the admin panel must never create an account and must reject anything
+// that isn't already role "admin"/"superadmin".
+const GOOGLE_OAUTH_APPS = ["main", "admin"];
+
+function parseGoogleState(state) {
+  const i = state.lastIndexOf(".");
+  const app = i === -1 ? "main" : state.slice(i + 1);
+  return GOOGLE_OAUTH_APPS.includes(app) ? app : "main";
 }
 
 // A precomputed bcrypt hash of a random value, compared against when the
@@ -112,6 +155,11 @@ authRouter.post(
           metadata: { email: data.email, reason: "no_such_user" },
         });
         return res.status(401).json({ error: "Invalid email or password", code: "INVALID_CREDENTIALS" });
+      }
+
+      if (user.banned) {
+        await logSecurityEvent({ userId: user._id, action: "login_blocked_banned", ip, userAgent });
+        return res.status(403).json({ error: "This account has been suspended.", code: "ACCOUNT_BANNED" });
       }
 
       if (user.isLocked()) {
@@ -244,6 +292,10 @@ authRouter.post(
 
       await logSecurityEvent({ userId: user._id, action: "register", ip, userAgent });
       sendTemplatedEmail("welcome", { user, vars: { signup_bonus_credits: String(settings.defaultCreditsOnSignup) } });
+      // Doesn't block/fail registration if it errors — this is defense
+      // against a claimed-but-unverified email, not a hard requirement to
+      // use the app (see the User model comment on emailVerified).
+      issueEmailVerification(user).catch(() => {});
 
       setAccessCookie(res, accessToken);
       setRefreshCookie(res, refreshToken, { rememberMe: true });
@@ -271,8 +323,12 @@ authRouter.get(
 
     // CSRF/replay protection for the redirect round-trip: a random value
     // stashed in a short-lived cookie now, and required to come back
-    // unchanged as the `state` query param on the callback.
-    const state = crypto.randomBytes(24).toString("base64url");
+    // unchanged as the `state` query param on the callback. The `.app`
+    // suffix rides along on the exact same value, so it's implicitly
+    // covered by the same cookie-equality check — no separate cookie
+    // needed just to carry which app started this.
+    const app = GOOGLE_OAUTH_APPS.includes(req.query.app) ? req.query.app : "main";
+    const state = `${crypto.randomBytes(24).toString("base64url")}.${app}`;
     res.cookie(GOOGLE_STATE_COOKIE, state, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
@@ -304,12 +360,20 @@ authRouter.get(
   "/google/callback",
   asyncHandler(async (req, res) => {
     const appUrl = process.env.APP_URL || "http://localhost:3000";
+    const adminAppUrl = process.env.ADMIN_APP_URL || "http://localhost:5174";
     const ip = clientIp(req);
     const userAgent = req.headers["user-agent"] || "";
 
+    // `app` is resolved from `state` below (the only tamper-proof carrier
+    // available mid-flow — it's verified byte-for-byte against the state
+    // cookie first) and defaults to "main" until then, so an early failure
+    // (bad state, Google-side error) still has somewhere sane to send the
+    // browser back to.
+    let app = "main";
     function failRedirect(reason) {
-      logSecurityEvent({ action: "google_login_failed", ip, userAgent, metadata: { reason } }).catch(() => {});
-      res.redirect(`${appUrl}/login?error=google_failed`);
+      logSecurityEvent({ action: "google_login_failed", ip, userAgent, metadata: { reason, app } }).catch(() => {});
+      const base = app === "admin" ? adminAppUrl : appUrl;
+      res.redirect(`${base}/login?error=google_failed`);
     }
 
     try {
@@ -323,6 +387,8 @@ authRouter.get(
       if (req.query.error) return failRedirect("denied_by_user");
       const { code, state } = req.query;
       if (!code || !state || !cookieState || state !== cookieState) return failRedirect("state_mismatch");
+      app = parseGoogleState(state);
+      const redirectAppUrl = app === "admin" ? adminAppUrl : appUrl;
 
       const tokenRes = await fetch(GOOGLE_TOKEN_URL, {
         method: "POST",
@@ -358,7 +424,10 @@ authRouter.get(
       if (!user) {
         // An existing password account with this same, Google-verified
         // email gets linked rather than duplicated — from then on it can
-        // sign in either way.
+        // sign in either way. Applies to admin accounts too: a superadmin
+        // or limited admin created the normal way (password, or granted via
+        // the admin-accounts API) can link and start using Google sign-in
+        // the first time they use it, same as any other account.
         user = await User.findOne({ email });
         if (user) {
           user.googleId = googleId;
@@ -366,6 +435,15 @@ authRouter.get(
           await user.save();
         }
       }
+
+      // The admin panel never creates an account through this flow — Google
+      // sign-in there only works for an email that's *already* an
+      // admin/superadmin. Letting it auto-create (like the main app does)
+      // would mean anyone with a Google account could self-provision an
+      // account that then just fails the role check below, which is a
+      // pointless account-creation side effect at best and a confusing
+      // enumeration surface at worst; failing before creating avoids both.
+      if (!user && app === "admin") return failRedirect("no_admin_account");
 
       if (!user) {
         const settings = await getPlatformSettings();
@@ -380,6 +458,10 @@ authRouter.get(
           passwordHash: null,
           avatarUrl: payload.picture || null,
           role: "user",
+          // payload.email_verified was already required (checked above) to
+          // reach this point — Google has already done the proof-of-
+          // ownership work /register's token flow exists to do.
+          emailVerified: true,
           credits: settings.defaultCreditsOnSignup,
           lastLoginAt: new Date(),
         });
@@ -387,9 +469,22 @@ authRouter.get(
         sendTemplatedEmail("welcome", { user, vars: { signup_bonus_credits: String(settings.defaultCreditsOnSignup) } });
       }
 
+      // Mirrors AuthContext.jsx's own client-side check on the admin panel
+      // (defense in depth, not the only gate) — a "user"-role account
+      // (or one demoted since it last linked Google) never gets an admin
+      // session, even if the email/Google identity itself checks out fine.
+      if (app === "admin" && user.role !== "admin" && user.role !== "superadmin") {
+        return failRedirect("not_admin");
+      }
+
+      if (user.banned) {
+        logSecurityEvent({ userId: user._id, action: "login_blocked_banned", ip, userAgent, metadata: { app } }).catch(() => {});
+        return res.redirect(`${redirectAppUrl}/login?error=account_banned`);
+      }
+
       if (user.isLocked()) {
-        logSecurityEvent({ userId: user._id, action: "login_blocked_locked", ip, userAgent }).catch(() => {});
-        return res.redirect(`${appUrl}/login?error=account_locked`);
+        logSecurityEvent({ userId: user._id, action: "login_blocked_locked", ip, userAgent, metadata: { app } }).catch(() => {});
+        return res.redirect(`${redirectAppUrl}/login?error=account_locked`);
       }
 
       await recordSuccessfulLogin(user);
@@ -403,11 +498,17 @@ authRouter.get(
       });
       const accessToken = await signAccessToken({ userId: user._id, role: user.role });
 
-      await logSecurityEvent({ userId: user._id, action: isNewAccount ? "google_register" : "google_login", ip, userAgent });
+      await logSecurityEvent({
+        userId: user._id,
+        action: isNewAccount ? "google_register" : "google_login",
+        ip,
+        userAgent,
+        metadata: { app },
+      });
 
       setAccessCookie(res, accessToken);
       setRefreshCookie(res, refreshToken, { rememberMe: true });
-      res.redirect(`${appUrl}/dashboard`);
+      res.redirect(app === "admin" ? redirectAppUrl : `${redirectAppUrl}/dashboard`);
     } catch (err) {
       console.error("Google OAuth callback failed:", err);
       failRedirect("exception");
@@ -494,6 +595,97 @@ authRouter.post(
   })
 );
 
+// Fills in dob/gender/phone/country after the fact — the one thing a Google
+// signup can't collect during /google/callback (Google's profile scope
+// doesn't carry any of it). Reuses registerSchema's own field rules via
+// completeProfileSchema, so a Google-originated account ends up with
+// exactly the same shape of data a password signup collects up front.
+// Not restricted to accounts that still need it — also doubles as a
+// general "update these profile fields" endpoint since no other one exists.
+authRouter.patch(
+  "/profile",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const data = parseJson(req, res, completeProfileSchema);
+    if (!data) return;
+
+    await connectDB();
+    user.dob = data.dob;
+    user.gender = data.gender;
+    user.phone = data.phone || null;
+    user.country = data.country || null;
+    await user.save();
+
+    res.json({ user: user.toSafeJSON() });
+  })
+);
+
+// GET (no CSRF — safe/idempotent, same convention as invitations.js's
+// GET /:token) lets the frontend's /verify-email/:token page show what it's
+// about to do before the user commits; POST (CSRF-protected) is the actual
+// mutation. Neither requires being logged in — the token itself, mailed
+// only to the address being verified, is the proof of ownership, not the
+// browser's session cookie (matching how /reset-password's OTP-based
+// identity works, not the cookie-based identity change-password uses).
+authRouter.get(
+  "/verify-email/:token",
+  asyncHandler(async (req, res) => {
+    await connectDB();
+    const user = await User.findOne({ emailVerificationTokenHash: hashToken(req.params.token) });
+    if (!user) return res.json({ status: "invalid" });
+    if (user.emailVerified) return res.json({ status: "already_verified" });
+    if (!user.emailVerificationExpiresAt || user.emailVerificationExpiresAt < new Date()) {
+      return res.json({ status: "expired" });
+    }
+    res.json({ status: "valid", email: user.email });
+  })
+);
+
+authRouter.post(
+  "/verify-email/:token",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    await connectDB();
+    const user = await User.findOne({ emailVerificationTokenHash: hashToken(req.params.token) });
+    if (!user) return badRequest(res, "Invalid or expired verification link");
+    if (user.emailVerified) return res.json({ ok: true, alreadyVerified: true });
+    if (!user.emailVerificationExpiresAt || user.emailVerificationExpiresAt < new Date()) {
+      return badRequest(res, "This verification link has expired. Request a new one.");
+    }
+
+    user.emailVerified = true;
+    user.emailVerificationTokenHash = null;
+    user.emailVerificationExpiresAt = null;
+    await user.save();
+
+    await logSecurityEvent({ userId: user._id, action: "email_verified", ip: clientIp(req) });
+    res.json({ ok: true });
+  })
+);
+
+authRouter.post(
+  "/resend-verification",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+    if (user.emailVerified) return res.json({ ok: true, alreadyVerified: true });
+
+    const { allowed } = rateLimit(`resend-verification:${user._id}`, { limit: 5, windowMs: 60 * 60 * 1000 });
+    if (!allowed) return badRequest(res, "Too many requests. Please try again later.");
+
+    await connectDB();
+    await issueEmailVerification(user);
+    res.json({ ok: true });
+  })
+);
+
 authRouter.post(
   "/change-password",
   asyncHandler(async (req, res) => {
@@ -529,6 +721,11 @@ authRouter.post(
 
       await revokeAllSessionsForUser(user._id, "password_changed");
       await logSecurityEvent({ userId: user._id, action: "change_password_success", ip });
+      // Out-of-band signal: this account's real owner should hear about it
+      // even though they're the one who (should have) just done it — if
+      // this wasn't them, the revoked sessions alone are a silent event
+      // they'd otherwise have no way to notice.
+      sendTemplatedEmail("security_alert", { user, vars: { security_alert_context: "" } });
 
       clearAuthCookies(res);
       res.json({ ok: true, message: "Password changed. Please log in again on all devices." });
@@ -634,6 +831,10 @@ authRouter.post(
       await otpDoc.deleteOne();
       await revokeAllSessionsForUser(user._id, "password_reset");
       await logSecurityEvent({ userId: user._id, action: "password_reset_success", ip: clientIp(req) });
+      sendTemplatedEmail("security_alert", {
+        user,
+        vars: { security_alert_context: " via the forgot-password flow" },
+      });
 
       clearAuthCookies(res);
       res.json({ ok: true, message: "Password reset. Please log in with your new password." });
@@ -690,6 +891,77 @@ authRouter.post(
     } catch (err) {
       serverError(res, err, "Failed to delete account");
     }
+  })
+);
+
+// GDPR-style "export my data" — everything the account deletion flow above
+// destroys, as a downloadable JSON snapshot the user can keep. Scoped to
+// the account's own metadata and history, not a bulk re-download of every
+// original photo/video file it owns — those already have their own
+// per-item download path (see media.js's /:id/file with ?download=1), and
+// bundling every original into one export response would be a very
+// different (streaming/zip, potentially gigabytes) feature.
+authRouter.get(
+  "/export-data",
+  asyncHandler(async (req, res) => {
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    await connectDB();
+
+    const [ownedTimelines, memberships, orders, activity] = await Promise.all([
+      Timeline.find({ ownerId: user._id, deletedAt: null }).select("title slug description createdAt").lean(),
+      Membership.find({ userId: user._id, status: "active" }).populate("timelineId", "title slug").lean(),
+      Order.find({ userId: user._id }).lean(),
+      ActivityLog.find({ userId: user._id, kind: "activity" }).sort({ createdAt: -1 }).limit(1000).lean(),
+    ]);
+
+    const exportPayload = {
+      exportedAt: new Date().toISOString(),
+      account: {
+        id: user._id.toString(),
+        email: user.email,
+        name: user.name,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        dob: user.dob,
+        gender: user.gender,
+        phone: user.phone,
+        country: user.country,
+        role: user.role,
+        credits: user.credits,
+        emailVerified: user.emailVerified,
+        createdAt: user.createdAt,
+      },
+      ownedTimelines: ownedTimelines.map((t) => ({
+        title: t.title,
+        slug: t.slug,
+        description: t.description,
+        createdAt: t.createdAt,
+      })),
+      memberships: memberships
+        .filter((m) => m.timelineId)
+        .map((m) => ({ timeline: m.timelineId.title, slug: m.timelineId.slug, role: m.role, joinedAt: m.joinedAt })),
+      orders: orders.map((o) => ({
+        id: o._id.toString(),
+        gatewayProvider: o.gatewayProvider,
+        amount: o.amount,
+        currency: o.currency,
+        credits: o.credits,
+        status: o.status,
+        createdAt: o.createdAt,
+        paidAt: o.paidAt,
+      })),
+      // Security-kind events (logins, lockouts) are deliberately excluded —
+      // this mirrors what the in-app activity feed already shows the user
+      // about themselves, not the indefinitely-retained security log.
+      activity: activity.map((a) => ({ action: a.action, createdAt: a.createdAt, metadata: a.metadata })),
+    };
+
+    await logSecurityEvent({ userId: user._id, action: "data_export_requested", ip: clientIp(req) });
+
+    res.setHeader("Content-Disposition", `attachment; filename="timeline-data-export-${user._id}.json"`);
+    res.json(exportPayload);
   })
 );
 

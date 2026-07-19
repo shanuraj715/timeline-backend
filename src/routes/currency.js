@@ -5,7 +5,7 @@ import Currency from "../models/Currency.js";
 import PricingPlan from "../models/PricingPlan.js";
 import { createCurrencySchema, updateCurrencySchema } from "../lib/validation/currency.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, notFound, clientIp } from "../lib/auth/guards.js";
+import { requirePermission, notFound, clientIp } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { currencyForCountry } from "../lib/countryCurrencyMap.js";
@@ -16,7 +16,7 @@ export const publicCurrencyRouter = Router();
 currencyRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.currencies");
     if (!admin) return;
     await connectDB();
     const currencies = await Currency.find({}).sort({ order: 1, code: 1 });
@@ -28,7 +28,7 @@ currencyRouter.post(
   "/",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.currencies");
     if (!admin) return;
 
     const data = parseJson(req, res, createCurrencySchema);
@@ -65,7 +65,7 @@ currencyRouter.patch(
   "/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.currencies");
     if (!admin) return;
 
     const data = parseJson(req, res, updateCurrencySchema);
@@ -104,7 +104,7 @@ currencyRouter.delete(
   "/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.currencies");
     if (!admin) return;
 
     await connectDB();

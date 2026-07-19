@@ -194,11 +194,12 @@ mediaRouter.get(
 
       const { stream, size, start, end } = await storage.createReadStream(storageKey, range);
 
+      const disposition = req.query.download ? "attachment" : "inline";
       const headers = {
         "Content-Type": contentType,
         "Accept-Ranges": "bytes",
         "Cache-Control": "private, max-age=86400, must-revalidate",
-        "Content-Disposition": `inline; filename="${encodeURIComponent(media.originalFilename || media._id.toString())}"`,
+        "Content-Disposition": `${disposition}; filename="${encodeURIComponent(media.originalFilename || media._id.toString())}"`,
         "Content-Length": String(end - start + 1),
       };
 
@@ -243,6 +244,53 @@ mediaRouter.get(
       console.error("Failed to stream thumbnail:", err);
       notFound(res, "Thumbnail not found in storage");
     }
+  })
+);
+
+// Mints a long-TTL variant of the same signed token every media list/detail
+// response already embeds (see lib/auth/mediaToken.js) — the file route
+// already accepts a token in place of a cookie session (authorizeMediaAccess's
+// fast path), so a longer TTL is the entire mechanism needed to make that
+// URL work for a recipient with no account at all, not a separate sharing
+// subsystem. Deliberately time-limited (7 days) rather than forever, since
+// there's no revocation list for a bare HMAC token — it can only ever
+// expire, not be individually invalidated.
+const SHARE_LINK_TTL_SECONDS = 7 * 24 * 60 * 60;
+
+mediaRouter.post(
+  "/:id/share",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { id } = req.params;
+    await connectDB();
+
+    const media = await Media.findOne({ _id: id, deletedAt: null });
+    if (!media) return notFound(res, "Media not found");
+
+    const membership = await Membership.findOne({ timelineId: media.timelineId, userId: user._id, status: "active" });
+    if (!membership) return unauthorized(res, "You don't have access to this timeline");
+    if (!checkPermission("viewMedia", membership, res)) return;
+
+    const token = signMediaToken(
+      { mediaId: media._id, timelineId: media.timelineId, userId: user._id },
+      SHARE_LINK_TTL_SECONDS
+    );
+    const url = `${process.env.APP_URL || ""}/api/media/${media._id}/file?token=${token}&download=1`;
+
+    await logActivity({
+      userId: user._id,
+      timelineId: media.timelineId,
+      action: "media_share_link_created",
+      targetType: "media",
+      targetId: media._id,
+      ip: clientIp(req),
+    });
+
+    res.json({ url, expiresAt: new Date(Date.now() + SHARE_LINK_TTL_SECONDS * 1000) });
   })
 );
 

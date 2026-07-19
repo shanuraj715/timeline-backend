@@ -7,7 +7,7 @@ import FooterColumn from "../models/FooterColumn.js";
 import Page from "../models/Page.js";
 import { navItemSchema, navItemReorderSchema, footerColumnSchema, footerColumnReorderSchema, createPageSchema, updatePageSchema } from "../lib/validation/cms.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, notFound } from "../lib/auth/guards.js";
+import { requirePermission, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { validateMediaFile } from "../lib/media/fileValidation.js";
@@ -60,7 +60,7 @@ function mimeForFilename(filename) {
 cmsRouter.get(
   "/nav",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.navigation");
     if (!admin) return;
     await connectDB();
     const items = await NavItem.find({}).sort({ order: 1 });
@@ -72,7 +72,7 @@ cmsRouter.post(
   "/nav",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.navigation");
     if (!admin) return;
 
     const data = parseJson(req, res, navItemSchema);
@@ -92,7 +92,7 @@ cmsRouter.patch(
   "/nav/reorder",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.navigation");
     if (!admin) return;
 
     const data = parseJson(req, res, navItemReorderSchema);
@@ -108,7 +108,7 @@ cmsRouter.patch(
   "/nav/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.navigation");
     if (!admin) return;
 
     const data = parseJson(req, res, navItemSchema.partial());
@@ -125,7 +125,7 @@ cmsRouter.delete(
   "/nav/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.navigation");
     if (!admin) return;
 
     await connectDB();
@@ -140,7 +140,7 @@ cmsRouter.delete(
 cmsRouter.get(
   "/footer",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.footer");
     if (!admin) return;
     await connectDB();
     const columns = await FooterColumn.find({}).sort({ order: 1 });
@@ -152,7 +152,7 @@ cmsRouter.post(
   "/footer",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.footer");
     if (!admin) return;
 
     const data = parseJson(req, res, footerColumnSchema);
@@ -172,7 +172,7 @@ cmsRouter.patch(
   "/footer/reorder",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.footer");
     if (!admin) return;
 
     const data = parseJson(req, res, footerColumnReorderSchema);
@@ -188,7 +188,7 @@ cmsRouter.patch(
   "/footer/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.footer");
     if (!admin) return;
 
     const data = parseJson(req, res, footerColumnSchema.partial());
@@ -205,7 +205,7 @@ cmsRouter.delete(
   "/footer/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.footer");
     if (!admin) return;
 
     await connectDB();
@@ -220,7 +220,7 @@ cmsRouter.delete(
 cmsRouter.get(
   "/pages",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.pages");
     if (!admin) return;
     await connectDB();
     const pages = await Page.find({}).sort({ updatedAt: -1 });
@@ -231,7 +231,7 @@ cmsRouter.get(
 cmsRouter.get(
   "/pages/:id",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.pages");
     if (!admin) return;
     await connectDB();
     const page = await Page.findById(req.params.id);
@@ -244,7 +244,7 @@ cmsRouter.post(
   "/pages",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.pages");
     if (!admin) return;
 
     const data = parseJson(req, res, createPageSchema);
@@ -271,7 +271,7 @@ cmsRouter.patch(
   "/pages/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.pages");
     if (!admin) return;
 
     const data = parseJson(req, res, updatePageSchema);
@@ -304,7 +304,7 @@ cmsRouter.delete(
   "/pages/:id",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.pages");
     if (!admin) return;
 
     await connectDB();
@@ -321,7 +321,7 @@ cmsRouter.post(
   uploadCmsMedia.single("file"),
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "content.pages");
     if (!admin) return;
 
     if (!req.file) return badRequest(res, "No file was provided");

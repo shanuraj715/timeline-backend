@@ -2,7 +2,7 @@ import { Router } from "express";
 import { connectDB } from "../lib/db/connect.js";
 import Order from "../models/Order.js";
 import User from "../models/User.js";
-import { requireSuperAdmin } from "../lib/auth/guards.js";
+import { requirePermission } from "../lib/auth/guards.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 
 export const analyticsRouter = Router();
@@ -36,7 +36,7 @@ const DATE_FORMAT = { day: "%Y-%m-%d", month: "%Y-%m" };
 analyticsRouter.get(
   "/summary",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "dashboard");
     if (!admin) return;
 
     await connectDB();
@@ -75,7 +75,7 @@ analyticsRouter.get(
 analyticsRouter.get(
   "/revenue-over-time",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "dashboard");
     if (!admin) return;
 
     await connectDB();
@@ -100,7 +100,7 @@ analyticsRouter.get(
 analyticsRouter.get(
   "/signups-over-time",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "dashboard");
     if (!admin) return;
 
     await connectDB();
@@ -124,7 +124,7 @@ analyticsRouter.get(
 analyticsRouter.get(
   "/recent-orders",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "dashboard");
     if (!admin) return;
 
     await connectDB();

@@ -28,12 +28,20 @@ export function verifyCsrf(req) {
 
   const allowed = getAllowedOrigins();
   const origin = req.headers.origin;
-  if (origin && !allowed.includes(origin)) return false;
+  const referer = req.headers.referer;
 
-  if (!origin) {
-    const referer = req.headers.referer;
-    if (referer && !allowed.some((a) => referer.startsWith(a))) return false;
-  }
+  // Every modern browser attaches an Origin header to same-origin fetch/XHR
+  // requests for "unsafe" methods, not just cross-origin ones — Origin
+  // being present is the normal case, not an edge case. A request with
+  // neither Origin nor Referer is what a same-origin browser client would
+  // never actually send, so treating that as passing (relying on the custom
+  // header alone) was the one gap in an otherwise origin-bound check: a
+  // non-browser client, or a proxy/webview that strips both headers, could
+  // walk straight through it. Reject outright instead.
+  if (!origin && !referer) return false;
+
+  if (origin && !allowed.includes(origin)) return false;
+  if (!origin && referer && !allowed.some((a) => referer.startsWith(a))) return false;
 
   return true;
 }

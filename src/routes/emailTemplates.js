@@ -9,7 +9,7 @@ import { renderTemplate } from "../lib/email/render.js";
 import { getActiveEmailProvider } from "../lib/email/index.js";
 import { updateEmailTemplateSchema, testEmailTemplateSchema } from "../lib/validation/email.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, notFound } from "../lib/auth/guards.js";
+import { requirePermission, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { validateMediaFile } from "../lib/media/fileValidation.js";
@@ -69,7 +69,7 @@ function serialize(template) {
 emailTemplatesRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "notifications.templates");
     if (!admin) return;
     await connectDB();
     const templates = await EmailTemplate.find({}).sort({ eventKey: 1 });
@@ -81,7 +81,7 @@ emailTemplatesRouter.patch(
   "/:eventKey",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "notifications.templates");
     if (!admin) return;
 
     if (!EVENT_KEY_VALUES.includes(req.params.eventKey)) return badRequest(res, "Unknown email event");
@@ -104,7 +104,7 @@ emailTemplatesRouter.post(
   "/:eventKey/preview",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "notifications.templates");
     if (!admin) return;
 
     if (!EVENT_KEY_VALUES.includes(req.params.eventKey)) return badRequest(res, "Unknown email event");
@@ -132,7 +132,7 @@ emailTemplatesRouter.post(
   "/:eventKey/test",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "notifications.templates");
     if (!admin) return;
 
     if (!EVENT_KEY_VALUES.includes(req.params.eventKey)) return badRequest(res, "Unknown email event");
@@ -174,7 +174,7 @@ emailTemplatesRouter.post(
   upload.single("image"),
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "notifications.templates");
     if (!admin) return;
 
     if (!req.file) return badRequest(res, "No image file was provided");

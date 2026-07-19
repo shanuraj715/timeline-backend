@@ -24,7 +24,14 @@ export async function getCurrentUser(req) {
 
   await connectDB();
   const user = await User.findById(claims.userId);
-  return user || null;
+  if (!user) return null;
+  // A banned account is treated as unauthenticated everywhere this is
+  // called (which is effectively every route) — the ban action also
+  // revokes all of that account's sessions, but this is what makes it take
+  // effect immediately rather than only once the current access token
+  // expires (up to 15 minutes later) or a refresh is attempted.
+  if (user.banned) return null;
+  return user;
 }
 
 export function unauthorized(res, message = "Authentication required") {
@@ -87,6 +94,26 @@ export async function requireSuperAdmin(req, res) {
     return null;
   }
   return user;
+}
+
+/**
+ * Requires the current account to hold a specific admin permission key (see
+ * lib/permissions.js), verified fresh from the DB same as requireSuperAdmin.
+ * A superadmin passes every check unconditionally — it implicitly holds
+ * every permission and doesn't use the `permissions` array at all. Route
+ * handlers use it as
+ * `const admin = await requirePermission(req, res, "commerce.currencies"); if (!admin) return;`.
+ */
+export async function requirePermission(req, res, key) {
+  const user = await getCurrentUser(req);
+  if (!user) {
+    unauthorized(res);
+    return null;
+  }
+  if (user.role === "superadmin") return user;
+  if (user.role === "admin" && user.permissions.includes(key)) return user;
+  forbidden(res, "You do not have permission to do this");
+  return null;
 }
 
 export function clientIp(req) {

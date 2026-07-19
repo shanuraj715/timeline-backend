@@ -4,7 +4,7 @@ import EmailProvider from "../models/EmailProvider.js";
 import { invalidateEmailProviderCache } from "../lib/email/index.js";
 import { upsertEmailProviderSchema } from "../lib/validation/email.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, notFound } from "../lib/auth/guards.js";
+import { requirePermission, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 import { encryptSecret, decryptSecret, maskSecret, MASK_PREFIX } from "../lib/crypto.js";
@@ -32,7 +32,7 @@ function serialize(provider) {
 emailProvidersRouter.get(
   "/",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "notifications.providers");
     if (!admin) return;
     await connectDB();
     const providers = await EmailProvider.find({});
@@ -44,7 +44,7 @@ emailProvidersRouter.put(
   "/:provider",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "notifications.providers");
     if (!admin) return;
 
     const providerKey = req.params.provider;
@@ -100,7 +100,7 @@ emailProvidersRouter.delete(
   "/:provider",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "notifications.providers");
     if (!admin) return;
 
     await connectDB();

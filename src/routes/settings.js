@@ -4,7 +4,7 @@ import { getPlatformSettings, updatePlatformSettings } from "../lib/platformSett
 import { invalidateMaintenanceCache } from "../lib/maintenance.js";
 import { updatePlatformSettingsSchema } from "../lib/validation/settings.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, getCurrentUser, unauthorized } from "../lib/auth/guards.js";
+import { requirePermission, getCurrentUser, unauthorized } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 
@@ -44,7 +44,7 @@ settingsRouter.put(
   "/",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "platform.settings");
     if (!admin) return;
 
     const data = parseJson(req, res, updatePlatformSettingsSchema);

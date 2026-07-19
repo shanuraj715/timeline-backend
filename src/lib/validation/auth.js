@@ -16,11 +16,11 @@ function isAtLeastYearsOld(date, years) {
   return date <= cutoff;
 }
 
-export const registerSchema = z.object({
-  firstName: z.string().trim().min(1, "First name is required").max(60),
-  lastName: z.string().trim().min(1, "Last name is required").max(60),
-  email,
-  password,
+// Shared by registerSchema (password signup collects these up front) and
+// completeProfileSchema (Google signup collects them after the fact, via
+// PATCH /api/auth/profile) — one set of rules for both, so "same data
+// saving process" stays true by construction rather than by convention.
+const profileDetails = {
   dob: z.coerce
     .date({ errorMap: () => ({ message: "Enter a valid date of birth" }) })
     .refine((d) => d < new Date(), "Date of birth must be in the past")
@@ -30,6 +30,14 @@ export const registerSchema = z.object({
   }),
   phone: z.string().trim().max(20).optional(),
   country: z.string().trim().max(100).optional(),
+};
+
+export const registerSchema = z.object({
+  firstName: z.string().trim().min(1, "First name is required").max(60),
+  lastName: z.string().trim().min(1, "Last name is required").max(60),
+  email,
+  password,
+  ...profileDetails,
   // .nullish() (not .optional()) — lib/recaptcha.js's getRecaptchaToken()
   // explicitly resolves to `null`, not `undefined`, whenever reCAPTCHA
   // isn't configured/enabled (its own documented contract), so the schema
@@ -37,6 +45,8 @@ export const registerSchema = z.object({
   // the moment reCAPTCHA is off.
   recaptchaToken: z.string().nullish(),
 });
+
+export const completeProfileSchema = z.object(profileDetails);
 
 export const loginSchema = z.object({
   email,

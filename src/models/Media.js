@@ -33,6 +33,19 @@ const MediaSchema = new Schema(
       lat: { type: Number, default: null },
       lng: { type: Number, default: null },
     },
+    // Read-only, populated from the file's own EXIF at upload time (see
+    // lib/media/exif.js) — unlike location, there's no manual-edit path for
+    // this, since it describes the physical camera/shot, not something a
+    // member would ever correct by hand.
+    camera: {
+      make: { type: String, default: null },
+      model: { type: String, default: null },
+      lens: { type: String, default: null },
+      iso: { type: Number, default: null },
+      fNumber: { type: Number, default: null },
+      exposureTime: { type: Number, default: null },
+      focalLength: { type: Number, default: null },
+    },
     favorite: { type: Boolean, default: false },
     tags: { type: [String], default: [], index: true },
     people: { type: [String], default: [], index: true },

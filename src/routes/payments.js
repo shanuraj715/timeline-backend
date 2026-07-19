@@ -7,7 +7,7 @@ import Order from "../models/Order.js";
 import User from "../models/User.js";
 import { upsertGatewaySchema, checkoutSchema, verifyPaymentSchema } from "../lib/validation/payments.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requireSuperAdmin, getCurrentUser, unauthorized, notFound, clientIp } from "../lib/auth/guards.js";
+import { requirePermission, getCurrentUser, unauthorized, notFound, clientIp } from "../lib/auth/guards.js";
 import { logSecurityEvent } from "../lib/logger.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
@@ -27,9 +27,35 @@ import { sendTemplatedEmail } from "../lib/email/send.js";
 // Redemptions are counted when an order actually gets paid, not at
 // checkout-creation time — an abandoned or failed order shouldn't consume
 // a limited coupon's redemption slot.
+//
+// The increment itself is the real enforcement point, not resolveCoupon's
+// precheck at checkout: several concurrent checkouts can each observe
+// redemptionCount < maxRedemptions and get a discounted order before any of
+// them pays, so the cap can only actually be enforced here, atomically,
+// against the live count. Returns ok:false (without incrementing) once the
+// cap is reached instead of throwing — the order has already been charged
+// by the time this runs, so the right response to an over-limit redemption
+// is to flag it for the admin, not to fail a payment that already went
+// through.
 async function incrementCouponRedemption(couponCode) {
-  if (!couponCode) return;
-  await Coupon.updateOne({ code: couponCode }, { $inc: { redemptionCount: 1 } });
+  if (!couponCode) return { ok: true };
+  const updated = await Coupon.findOneAndUpdate(
+    {
+      code: couponCode,
+      $or: [{ maxRedemptions: null }, { $expr: { $lt: ["$redemptionCount", "$maxRedemptions"] } }],
+    },
+    { $inc: { redemptionCount: 1 } }
+  );
+  return { ok: Boolean(updated) };
+}
+
+async function flagCouponOverLimit({ order, req }) {
+  await logSecurityEvent({
+    userId: order.userId,
+    action: "coupon_redeemed_over_limit",
+    ip: req ? clientIp(req) : null,
+    metadata: { couponCode: order.couponCode, orderId: order._id.toString() },
+  });
 }
 
 // Called from all three "an order just became paid" paths (mock complete,
@@ -86,7 +112,7 @@ function serializeGateway(gateway) {
 paymentsRouter.get(
   "/gateways",
   asyncHandler(async (req, res) => {
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.gateways");
     if (!admin) return;
     await connectDB();
     const gateways = await PaymentGateway.find({});
@@ -98,7 +124,7 @@ paymentsRouter.put(
   "/gateways/:provider",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.gateways");
     if (!admin) return;
 
     const provider = req.params.provider;
@@ -158,7 +184,7 @@ paymentsRouter.delete(
   "/gateways/:provider",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.gateways");
     if (!admin) return;
 
     await connectDB();
@@ -299,20 +325,30 @@ paymentsRouter.post(
     if (!user) return unauthorized(res);
 
     await connectDB();
-    const order = await Order.findOne({ _id: req.params.orderId, userId: user._id, gatewayProvider: "mock" });
-    if (!order) return notFound(res, "Order not found");
-
-    if (order.status === "paid") {
+    const preCheck = await Order.findOne({ _id: req.params.orderId, userId: user._id, gatewayProvider: "mock" });
+    if (!preCheck) return notFound(res, "Order not found");
+    if (preCheck.status === "paid") {
       const current = await User.findById(user._id);
       return res.json({ ok: true, alreadyPaid: true, credits: current.credits });
     }
-    if (order.status !== "created") return badRequest(res, "This order can no longer be completed");
+    if (preCheck.status !== "created") return badRequest(res, "This order can no longer be completed");
 
-    order.status = "paid";
-    order.gatewayPaymentId = `mock_pay_${order._id}`;
-    order.paidAt = new Date();
-    await order.save();
-    await incrementCouponRedemption(order.couponCode);
+    // Atomic created -> paid transition: the status filter and the write
+    // are one operation, so two concurrent completion requests for the
+    // same order can't both pass the precheck above and both credit the
+    // user's account.
+    const order = await Order.findOneAndUpdate(
+      { _id: req.params.orderId, userId: user._id, gatewayProvider: "mock", status: "created" },
+      { $set: { status: "paid", gatewayPaymentId: `mock_pay_${req.params.orderId}`, paidAt: new Date() } },
+      { new: true }
+    );
+    if (!order) {
+      const current = await User.findById(user._id);
+      return res.json({ ok: true, alreadyPaid: true, credits: current.credits });
+    }
+
+    const redemption = await incrementCouponRedemption(order.couponCode);
+    if (!redemption.ok) await flagCouponOverLimit({ order, req });
 
     const updatedUser = await User.findByIdAndUpdate(user._id, { $inc: { credits: order.credits } }, { new: true });
     sendPurchaseCompleteEmail(order, updatedUser);
@@ -332,10 +368,10 @@ paymentsRouter.post(
     if (!data) return;
 
     await connectDB();
-    const order = await Order.findOne({ _id: data.orderId, userId: user._id, gatewayProvider: "razorpay" });
-    if (!order) return notFound(res, "Order not found");
+    const preCheck = await Order.findOne({ _id: data.orderId, userId: user._id, gatewayProvider: "razorpay" });
+    if (!preCheck) return notFound(res, "Order not found");
 
-    if (order.status === "paid") {
+    if (preCheck.status === "paid") {
       const current = await User.findById(user._id);
       return res.json({ ok: true, alreadyPaid: true, credits: current.credits });
     }
@@ -352,11 +388,22 @@ paymentsRouter.post(
     });
     if (!valid) return badRequest(res, "Payment signature verification failed");
 
-    order.status = "paid";
-    order.gatewayPaymentId = data.razorpayPaymentId;
-    order.paidAt = new Date();
-    await order.save();
-    await incrementCouponRedemption(order.couponCode);
+    // Atomic status transition, guarding against this request racing the
+    // Razorpay webhook for the same order — only whichever of the two
+    // actually flips status first credits the user; the loser just reports
+    // the order as already paid.
+    const order = await Order.findOneAndUpdate(
+      { _id: data.orderId, userId: user._id, gatewayProvider: "razorpay", status: { $ne: "paid" } },
+      { $set: { status: "paid", gatewayPaymentId: data.razorpayPaymentId, paidAt: new Date() } },
+      { new: true }
+    );
+    if (!order) {
+      const current = await User.findById(user._id);
+      return res.json({ ok: true, alreadyPaid: true, credits: current.credits });
+    }
+
+    const redemption = await incrementCouponRedemption(order.couponCode);
+    if (!redemption.ok) await flagCouponOverLimit({ order, req });
 
     const updatedUser = await User.findByIdAndUpdate(user._id, { $inc: { credits: order.credits } }, { new: true });
     sendPurchaseCompleteEmail(order, updatedUser);
@@ -382,14 +429,24 @@ paymentsRouter.post(
     const event = req.body;
     if (event.event === "payment.captured") {
       const payment = event.payload?.payment?.entity;
-      const order = await Order.findOne({ gatewayOrderId: payment?.order_id, gatewayProvider: "razorpay" });
-      if (order && order.status !== "paid") {
-        order.status = "paid";
-        order.gatewayPaymentId = payment.id;
-        order.paidAt = new Date();
-        order.metadata = { ...order.metadata, webhookEvent: event.event };
-        await order.save();
-        await incrementCouponRedemption(order.couponCode);
+      // Atomic status transition — guards this against racing the
+      // client-side /verify call for the same order, which can otherwise
+      // credit the user twice (see /verify's matching comment above).
+      const order = await Order.findOneAndUpdate(
+        { gatewayOrderId: payment?.order_id, gatewayProvider: "razorpay", status: { $ne: "paid" } },
+        {
+          $set: {
+            status: "paid",
+            gatewayPaymentId: payment?.id,
+            paidAt: new Date(),
+            "metadata.webhookEvent": event.event,
+          },
+        },
+        { new: true }
+      );
+      if (order) {
+        const redemption = await incrementCouponRedemption(order.couponCode);
+        if (!redemption.ok) await flagCouponOverLimit({ order, req });
         const updatedUser = await User.findByIdAndUpdate(order.userId, { $inc: { credits: order.credits } }, { new: true });
         sendPurchaseCompleteEmail(order, updatedUser);
       }
@@ -438,23 +495,30 @@ paymentsRouter.post(
   "/orders/:id/refund",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requireSuperAdmin(req, res);
+    const admin = await requirePermission(req, res, "commerce.orders");
     if (!admin) return;
 
     await connectDB();
-    const order = await Order.findById(req.params.id);
-    if (!order) return notFound(res, "Order not found");
-    if (order.status !== "paid") return badRequest(res, "Only a paid order can be refunded");
-
-    const user = await User.findById(order.userId);
-    if (user) {
-      user.credits = Math.max(0, user.credits - order.credits);
-      await user.save();
+    // Atomic paid -> refunded transition: guards against a double-submit
+    // (or two admins refunding the same order at once) both passing the
+    // status check and both deducting credits from the user.
+    const order = await Order.findOneAndUpdate(
+      { _id: req.params.id, status: "paid" },
+      { $set: { status: "refunded", refundedAt: new Date() } },
+      { new: true }
+    );
+    if (!order) {
+      const existing = await Order.findById(req.params.id);
+      if (!existing) return notFound(res, "Order not found");
+      return badRequest(res, "Only a paid order can be refunded");
     }
 
-    order.status = "refunded";
-    order.refundedAt = new Date();
-    await order.save();
+    // Aggregation-pipeline update clamps to zero atomically in the same
+    // operation as the read, instead of a separate read-Math.max-write that
+    // could race a concurrent credit grant/spend on the same account.
+    await User.findByIdAndUpdate(order.userId, [
+      { $set: { credits: { $max: [0, { $subtract: ["$credits", order.credits] }] } } },
+    ]);
 
     await logSecurityEvent({
       userId: admin._id,
