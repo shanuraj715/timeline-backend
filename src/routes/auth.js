@@ -84,6 +84,26 @@ function googleRedirectUri() {
   return `${process.env.APP_URL || "http://localhost:3000"}/api/auth/google/callback`;
 }
 
+// The state cookie is set on whichever origin started the flow (main app or
+// admin panel) but the callback above always lands on the main app's origin
+// (googleRedirectUri() is never branched) — so on a real deployment, where
+// admin lives on its own subdomain, a host-only cookie set during an
+// admin-initiated login would never be sent back on the callback request and
+// every admin sign-in would fail state validation. Scoping the cookie to the
+// shared parent domain instead (".mytimelyne.com") makes it readable from
+// both. In local dev APP_URL is a bare "localhost", which has no dot-able
+// parent domain and doesn't need one — cookies there are already shared
+// across ports on the same host regardless of Domain.
+function googleStateCookieDomain() {
+  if (process.env.NODE_ENV !== "production") return undefined;
+  try {
+    const hostname = new URL(process.env.APP_URL || "").hostname;
+    return hostname && hostname !== "localhost" ? `.${hostname}` : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // "app" travels through Google's own `state` round-trip (appended after the
 // random CSRF value, verified byte-for-byte against the cookie same as
 // before) so the callback below knows whether this login started from the
@@ -334,6 +354,7 @@ authRouter.get(
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/api/auth/google",
+      domain: googleStateCookieDomain(),
       maxAge: 10 * 60 * 1000,
     });
 
@@ -382,7 +403,7 @@ authRouter.get(
       if (!client) return failRedirect("not_configured");
 
       const cookieState = req.cookies?.[GOOGLE_STATE_COOKIE];
-      res.clearCookie(GOOGLE_STATE_COOKIE, { path: "/api/auth/google" });
+      res.clearCookie(GOOGLE_STATE_COOKIE, { path: "/api/auth/google", domain: googleStateCookieDomain() });
 
       if (req.query.error) return failRedirect("denied_by_user");
       const { code, state } = req.query;
