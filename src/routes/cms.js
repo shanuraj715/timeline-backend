@@ -10,6 +10,8 @@ import { updateHomepageContentSchema } from "../lib/validation/homepageContent.j
 import { getHomepageContent, updateHomepageContent } from "../lib/homepageContent.js";
 import { updateBrandingSettingsSchema } from "../lib/validation/branding.js";
 import { getBrandingSettings, updateBrandingSettings } from "../lib/brandingSettings.js";
+import { updateWhyChooseUsContentSchema } from "../lib/validation/whyChooseUsContent.js";
+import { getWhyChooseUsContent, updateWhyChooseUsContent } from "../lib/whyChooseUsContent.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
 import { requirePermission, requireAnyPermission, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
@@ -389,6 +391,41 @@ cmsRouter.put(
   })
 );
 
+// ---- Why MyTimelyne (admin) ----
+// Singleton document (see lib/whyChooseUsContent.js) — same shape as
+// Homepage/Branding above: no list, no :id, admin edits go live immediately.
+
+cmsRouter.get(
+  "/why-choose-us",
+  asyncHandler(async (req, res) => {
+    const admin = await requirePermission(req, res, "content.whyChooseUs");
+    if (!admin) return;
+    await connectDB();
+    const whyChooseUs = await getWhyChooseUsContent();
+    res.json({ whyChooseUs });
+  })
+);
+
+cmsRouter.put(
+  "/why-choose-us",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+    const admin = await requirePermission(req, res, "content.whyChooseUs");
+    if (!admin) return;
+
+    const data = parseJson(req, res, updateWhyChooseUsContentSchema);
+    if (!data) return;
+
+    try {
+      await connectDB();
+      const whyChooseUs = await updateWhyChooseUsContent(data);
+      res.json({ whyChooseUs });
+    } catch (err) {
+      serverError(res, err, "Failed to update Why MyTimelyne content");
+    }
+  })
+);
+
 // ---- Page content media (image/video uploads for the rich-text editor) ----
 
 cmsRouter.post(
@@ -397,9 +434,14 @@ cmsRouter.post(
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
     // Shared upload endpoint — used by the Pages rich-text editor and every
-    // dedicated image field (Homepage, Branding), so any one permission is
-    // enough.
-    const admin = await requireAnyPermission(req, res, ["content.pages", "content.homepage", "content.branding"]);
+    // dedicated image field (Homepage, Branding, Why MyTimelyne), so any one
+    // permission is enough.
+    const admin = await requireAnyPermission(req, res, [
+      "content.pages",
+      "content.homepage",
+      "content.branding",
+      "content.whyChooseUs",
+    ]);
     if (!admin) return;
 
     if (!req.file) return badRequest(res, "No file was provided");
@@ -549,5 +591,14 @@ publicCmsRouter.get(
     await connectDB();
     const branding = await getBrandingSettings();
     res.json({ branding });
+  })
+);
+
+publicCmsRouter.get(
+  "/why-choose-us",
+  asyncHandler(async (req, res) => {
+    await connectDB();
+    const whyChooseUs = await getWhyChooseUsContent();
+    res.json({ whyChooseUs });
   })
 );

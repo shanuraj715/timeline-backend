@@ -18,6 +18,7 @@ export const PERMISSION_GROUPS = [
       { key: "content.footer", label: "Footer" },
       { key: "content.pages", label: "Pages" },
       { key: "content.homepage", label: "Homepage" },
+      { key: "content.whyChooseUs", label: "Why MyTimelyne" },
       { key: "content.branding", label: "Branding" },
       { key: "content.themes", label: "Themes" },
     ],
@@ -55,6 +56,11 @@ export const PERMISSION_GROUPS = [
       { key: "notifications.templates", label: "Email templates" },
       { key: "notifications.providers", label: "Email providers" },
     ],
+  },
+  {
+    key: "ads",
+    label: "Ads",
+    permissions: [{ key: "ads", label: "Ads" }],
   },
 ];
 

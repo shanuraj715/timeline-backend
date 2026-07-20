@@ -22,11 +22,13 @@ import { emailProvidersRouter } from "./routes/emailProviders.js";
 import { googleOAuthRouter, publicGoogleOAuthRouter } from "./routes/googleOAuth.js";
 import { currencyRouter, publicCurrencyRouter } from "./routes/currency.js";
 import { adminAccountsRouter } from "./routes/adminAccounts.js";
+import { adsRouter, publicAdsRouter } from "./routes/ads.js";
 import { serverError } from "./lib/apiError.js";
 import { maintenanceGate } from "./lib/maintenanceGate.js";
 import { bootstrapDefaultProvider } from "./lib/storage/index.js";
 import { startStorageWorker } from "./lib/storage/worker.js";
 import { bootstrapEmailTemplates } from "./lib/email/bootstrap.js";
+import { bootstrapAdPlacements } from "./lib/adPlacements.js";
 
 const PORT = process.env.PORT || 4000;
 
@@ -83,7 +85,9 @@ app.use("/api/email-providers", emailProvidersRouter);
 app.use("/api/google-oauth", googleOAuthRouter);
 app.use("/api/currencies", currencyRouter);
 app.use("/api/admin-accounts", adminAccountsRouter);
+app.use("/api/ads", adsRouter);
 app.use("/api/public", publicCmsRouter);
+app.use("/api/public/ads", publicAdsRouter);
 app.use("/api/public/feature-flags", publicFeatureFlagsRouter);
 app.use("/api/public/pricing", publicPricingRouter);
 app.use("/api/public/payment-gateways", publicPaymentsRouter);
@@ -104,6 +108,8 @@ bootstrapDefaultProvider()
   .catch((err) => console.error("Failed to bootstrap default storage provider:", err));
 
 bootstrapEmailTemplates().catch((err) => console.error("Failed to bootstrap email templates:", err));
+
+bootstrapAdPlacements().catch((err) => console.error("Failed to bootstrap ad placements:", err));
 
 app.listen(PORT, () => {
   console.log(`timeline-backend listening on http://localhost:${PORT}`);

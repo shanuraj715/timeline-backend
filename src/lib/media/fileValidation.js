@@ -62,6 +62,15 @@ const SVG_ALLOWED_ATTRIBUTES = {
     "width", "height", "viewBox", "preserveAspectRatio", "gradientUnits", "gradientTransform",
     "offset", "stop-color", "stop-opacity", "clip-path", "mask", "xmlns", "font-size",
     "font-family", "text-anchor",
+    // Unit-space attributes for <mask>/<clipPath>/<pattern> — without these,
+    // a <mask> with pixel-based x/y/width/height (the common case for
+    // icon-style exports, e.g. from Figma) silently falls back to the
+    // `objectBoundingBox` default, which puts the mask region wildly out of
+    // alignment with the artwork and masks it out entirely rather than
+    // producing a visibly wrong result — this is what made two real
+    // uploaded brand logos (Google Drive, OneDrive) render as a blank chip.
+    "maskUnits", "maskContentUnits", "clipPathUnits", "patternUnits", "patternContentUnits",
+    "patternTransform",
   ],
 };
 
