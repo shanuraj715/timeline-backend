@@ -29,7 +29,13 @@ import {
   listActiveSessions,
   hashToken,
 } from "../lib/auth/session.js";
-import { setAccessCookie, setRefreshCookie, clearAuthCookies, REFRESH_COOKIE } from "../lib/auth/cookies.js";
+import {
+  setAccessCookie,
+  setRefreshCookie,
+  clearAuthCookies,
+  crossSubdomainCookieDomain,
+  REFRESH_COOKIE,
+} from "../lib/auth/cookies.js";
 import { describeDevice } from "../lib/auth/device.js";
 import { rateLimit } from "../lib/auth/rateLimit.js";
 import { recordFailedLogin, recordSuccessfulLogin, lockoutMessage } from "../lib/auth/lockout.js";
@@ -84,25 +90,14 @@ function googleRedirectUri() {
   return `${process.env.APP_URL || "http://localhost:3000"}/api/auth/google/callback`;
 }
 
-// The state cookie is set on whichever origin started the flow (main app or
-// admin panel) but the callback above always lands on the main app's origin
-// (googleRedirectUri() is never branched) — so on a real deployment, where
-// admin lives on its own subdomain, a host-only cookie set during an
-// admin-initiated login would never be sent back on the callback request and
-// every admin sign-in would fail state validation. Scoping the cookie to the
-// shared parent domain instead (".mytimelyne.com") makes it readable from
-// both. In local dev APP_URL is a bare "localhost", which has no dot-able
-// parent domain and doesn't need one — cookies there are already shared
-// across ports on the same host regardless of Domain.
-function googleStateCookieDomain() {
-  if (process.env.NODE_ENV !== "production") return undefined;
-  try {
-    const hostname = new URL(process.env.APP_URL || "").hostname;
-    return hostname && hostname !== "localhost" ? `.${hostname}` : undefined;
-  } catch {
-    return undefined;
-  }
-}
+// The state cookie (and, on success, the session cookies below) are set on
+// whichever origin started the flow (main app or admin panel) but the
+// callback above always lands on the main app's origin (googleRedirectUri()
+// is never branched) — so on a real deployment, where admin lives on its own
+// subdomain, a host-only cookie set during an admin-initiated login would
+// never make it back to admin.mytimelyne.com. crossSubdomainCookieDomain()
+// scopes them to the shared parent domain instead so they're readable from
+// both; see its own comment in cookies.js.
 
 // "app" travels through Google's own `state` round-trip (appended after the
 // random CSRF value, verified byte-for-byte against the cookie same as
@@ -354,7 +349,7 @@ authRouter.get(
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
       path: "/api/auth/google",
-      domain: googleStateCookieDomain(),
+      domain: crossSubdomainCookieDomain(),
       maxAge: 10 * 60 * 1000,
     });
 
@@ -403,7 +398,7 @@ authRouter.get(
       if (!client) return failRedirect("not_configured");
 
       const cookieState = req.cookies?.[GOOGLE_STATE_COOKIE];
-      res.clearCookie(GOOGLE_STATE_COOKIE, { path: "/api/auth/google", domain: googleStateCookieDomain() });
+      res.clearCookie(GOOGLE_STATE_COOKIE, { path: "/api/auth/google", domain: crossSubdomainCookieDomain() });
 
       if (req.query.error) return failRedirect("denied_by_user");
       const { code, state } = req.query;
@@ -527,8 +522,9 @@ authRouter.get(
         metadata: { app },
       });
 
-      setAccessCookie(res, accessToken);
-      setRefreshCookie(res, refreshToken, { rememberMe: true });
+      const cookieDomain = crossSubdomainCookieDomain();
+      setAccessCookie(res, accessToken, { domain: cookieDomain });
+      setRefreshCookie(res, refreshToken, { rememberMe: true, domain: cookieDomain });
       res.redirect(app === "admin" ? redirectAppUrl : `${redirectAppUrl}/dashboard`);
     } catch (err) {
       console.error("Google OAuth callback failed:", err);
