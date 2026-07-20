@@ -17,6 +17,8 @@ export const PERMISSION_GROUPS = [
       { key: "content.navigation", label: "Navigation" },
       { key: "content.footer", label: "Footer" },
       { key: "content.pages", label: "Pages" },
+      { key: "content.homepage", label: "Homepage" },
+      { key: "content.branding", label: "Branding" },
       { key: "content.themes", label: "Themes" },
     ],
   },
@@ -25,6 +27,7 @@ export const PERMISSION_GROUPS = [
     label: "Commerce",
     permissions: [
       { key: "commerce.pricing", label: "Pricing plans" },
+      { key: "commerce.creditCosts", label: "Credit costs" },
       { key: "commerce.currencies", label: "Currencies" },
       { key: "commerce.coupons", label: "Coupons" },
       { key: "commerce.gateways", label: "Payment gateways" },

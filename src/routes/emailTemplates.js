@@ -12,7 +12,7 @@ import { parseJson, badRequest, serverError } from "../lib/apiError.js";
 import { requirePermission, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
-import { validateMediaFile } from "../lib/media/fileValidation.js";
+import { validateMediaFile, sanitizeSvgBuffer } from "../lib/media/fileValidation.js";
 import { getStorage } from "../lib/storage/index.js";
 
 export const emailTemplatesRouter = Router();
@@ -25,6 +25,7 @@ const IMAGE_EXT_MIME = {
   ".png": "image/png",
   ".gif": "image/gif",
   ".webp": "image/webp",
+  ".svg": "image/svg+xml",
 };
 
 // Sample data so preview/test always renders something meaningful — none of
@@ -179,14 +180,16 @@ emailTemplatesRouter.post(
 
     if (!req.file) return badRequest(res, "No image file was provided");
 
-    const validation = await validateMediaFile(req.file.buffer);
+    const validation = await validateMediaFile(req.file.buffer, { allowSvg: true });
     if (!validation.valid || validation.type !== "image") {
       return badRequest(res, validation.reason || "File must be a valid image");
     }
 
+    const fileBuffer = validation.mime === "image/svg+xml" ? sanitizeSvgBuffer(req.file.buffer) : req.file.buffer;
+
     const filename = `${imageId()}${validation.extension}`;
     const storage = await getStorage();
-    await storage.write(`email-assets/${filename}`, req.file.buffer);
+    await storage.write(`email-assets/${filename}`, fileBuffer);
 
     res.status(201).json({ url: `${process.env.APP_URL || ""}/api/email-templates/images/${filename}` });
   })
@@ -199,7 +202,7 @@ emailTemplatesRouter.get(
   "/images/:filename",
   asyncHandler(async (req, res) => {
     const { filename } = req.params;
-    if (!/^[A-Za-z0-9]+\.(jpg|jpeg|png|gif|webp)$/.test(filename)) return notFound(res, "Image not found");
+    if (!/^[A-Za-z0-9]+\.(jpg|jpeg|png|gif|webp|svg)$/.test(filename)) return notFound(res, "Image not found");
 
     const storage = await getStorage();
     const key = `email-assets/${filename}`;
@@ -212,6 +215,11 @@ emailTemplatesRouter.get(
         "Content-Type": IMAGE_EXT_MIME[ext] || "application/octet-stream",
         "Cache-Control": "public, max-age=604800, immutable",
         "Content-Length": String(size),
+        // See routes/cms.js's equivalent serve route for why: defense-in
+        // -depth for a direct-navigation SVG open, on top of upload-time
+        // sanitization.
+        "Content-Security-Policy": "script-src 'none'",
+        "X-Content-Type-Options": "nosniff",
       });
       stream.pipe(res);
     } catch (err) {

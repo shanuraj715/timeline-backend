@@ -4,7 +4,7 @@ import { getPlatformSettings, updatePlatformSettings } from "../lib/platformSett
 import { invalidateMaintenanceCache } from "../lib/maintenance.js";
 import { updatePlatformSettingsSchema } from "../lib/validation/settings.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requirePermission, getCurrentUser, unauthorized } from "../lib/auth/guards.js";
+import { requireAnyPermission, getCurrentUser, unauthorized } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
 
@@ -18,6 +18,8 @@ function serialize(settings) {
     defaultCreditsOnSignup: settings.defaultCreditsOnSignup,
     storageUnitBytes: settings.storageUnitBytes,
     storageUnitPriceCredits: settings.storageUnitPriceCredits,
+    allowGuestViewing: settings.allowGuestViewing,
+    viewerListUnlockPriceCredits: settings.viewerListUnlockPriceCredits,
     maintenanceMode: {
       enabled: Boolean(settings.maintenanceMode?.enabled),
       message: settings.maintenanceMode?.message || "",
@@ -44,7 +46,7 @@ settingsRouter.put(
   "/",
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requirePermission(req, res, "platform.settings");
+    const admin = await requireAnyPermission(req, res, ["platform.settings", "commerce.creditCosts"]);
     if (!admin) return;
 
     const data = parseJson(req, res, updatePlatformSettingsSchema);

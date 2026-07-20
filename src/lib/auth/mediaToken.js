@@ -19,11 +19,16 @@ function base64url(input) {
   return Buffer.from(input).toString("base64url");
 }
 
+// `userId` is optional — a guest (public timeline, no session) has none.
+// authorizeMediaAccess()'s fast path only ever checks the signature and
+// that payload.timelineId matches the requested media's own timeline; the
+// userId field is informational only, never compared against anything, so
+// there's nothing else to special-case for an anonymous viewer here.
 export function signMediaToken({ mediaId, timelineId, userId }, ttlSeconds = DEFAULT_TTL_SECONDS) {
   const payload = {
     mediaId: mediaId.toString(),
     timelineId: timelineId.toString(),
-    userId: userId.toString(),
+    userId: userId ? userId.toString() : null,
     exp: Math.floor(Date.now() / 1000) + ttlSeconds,
   };
   const payloadB64 = base64url(JSON.stringify(payload));

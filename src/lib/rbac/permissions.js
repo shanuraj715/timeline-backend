@@ -30,6 +30,7 @@ export const permissions = {
 
   deleteTimeline: (role) => roleAtLeast(role, "owner"),
   transferOwnership: (role) => roleAtLeast(role, "owner"),
+  viewViewerAnalytics: (role) => roleAtLeast(role, "owner"),
 };
 
 export function canAssignRole(actorRole, targetRole) {

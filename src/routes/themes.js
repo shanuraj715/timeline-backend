@@ -9,7 +9,7 @@ import { parseJson, badRequest, serverError } from "../lib/apiError.js";
 import { requirePermission, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
-import { validateMediaFile } from "../lib/media/fileValidation.js";
+import { validateMediaFile, sanitizeSvgBuffer } from "../lib/media/fileValidation.js";
 import { getStorage } from "../lib/storage/index.js";
 
 export const themesRouter = Router();
@@ -25,6 +25,7 @@ export function serializeTheme(theme) {
     description: theme.description,
     colors: theme.colors,
     imageUrl: theme.imageKey ? `/api/themes/${theme._id}/image` : null,
+    imageUrlDark: theme.imageKeyDark ? `/api/themes/${theme._id}/image-dark` : null,
     imagePosition: theme.imagePosition,
     overlayStyle: theme.overlayStyle,
     overlayOpacity: theme.overlayOpacity,
@@ -174,14 +175,16 @@ themesRouter.post(
 
     if (!req.file) return badRequest(res, "No image file was provided");
 
-    const validation = await validateMediaFile(req.file.buffer);
+    const validation = await validateMediaFile(req.file.buffer, { allowSvg: true });
     if (!validation.valid || validation.type !== "image") {
       return badRequest(res, validation.reason || "File must be a valid image");
     }
 
+    const fileBuffer = validation.mime === "image/svg+xml" ? sanitizeSvgBuffer(req.file.buffer) : req.file.buffer;
+
     const imageKey = `theme-assets/${theme._id}/image${validation.extension}`;
     const storage = await getStorage();
-    await storage.write(imageKey, req.file.buffer);
+    await storage.write(imageKey, fileBuffer);
 
     theme.imageKey = imageKey;
     theme.imageMimeType = validation.mime;
@@ -202,11 +205,77 @@ themesRouter.delete(
     const theme = await Theme.findById(req.params.id);
     if (!theme) return notFound(res, "Theme not found");
 
+    const storage = await getStorage();
     if (theme.imageKey) {
-      const storage = await getStorage();
       await storage.remove(theme.imageKey).catch(() => {});
       theme.imageKey = null;
       theme.imageMimeType = null;
+    }
+    // Dark can never legitimately outlive Light (see imageKeyDark's comment
+    // on the model) — removing Light removes Dark too, not just when Dark
+    // was set moments ago but whenever it exists, so this invariant holds
+    // after a delete the same way it's enforced on upload.
+    if (theme.imageKeyDark) {
+      await storage.remove(theme.imageKeyDark).catch(() => {});
+      theme.imageKeyDark = null;
+      theme.imageMimeTypeDark = null;
+    }
+    await theme.save();
+
+    res.json({ theme: serializeTheme(theme) });
+  })
+);
+
+themesRouter.post(
+  "/:id/image-dark",
+  upload.single("image"),
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+    const admin = await requirePermission(req, res, "content.themes");
+    if (!admin) return;
+
+    await connectDB();
+    const theme = await Theme.findById(req.params.id);
+    if (!theme) return notFound(res, "Theme not found");
+    if (!theme.imageKey) return badRequest(res, "Upload a light theme image first");
+
+    if (!req.file) return badRequest(res, "No image file was provided");
+
+    const validation = await validateMediaFile(req.file.buffer, { allowSvg: true });
+    if (!validation.valid || validation.type !== "image") {
+      return badRequest(res, validation.reason || "File must be a valid image");
+    }
+
+    const fileBuffer = validation.mime === "image/svg+xml" ? sanitizeSvgBuffer(req.file.buffer) : req.file.buffer;
+
+    const imageKeyDark = `theme-assets/${theme._id}/image-dark${validation.extension}`;
+    const storage = await getStorage();
+    await storage.write(imageKeyDark, fileBuffer);
+
+    theme.imageKeyDark = imageKeyDark;
+    theme.imageMimeTypeDark = validation.mime;
+    await theme.save();
+
+    res.json({ theme: serializeTheme(theme) });
+  })
+);
+
+themesRouter.delete(
+  "/:id/image-dark",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+    const admin = await requirePermission(req, res, "content.themes");
+    if (!admin) return;
+
+    await connectDB();
+    const theme = await Theme.findById(req.params.id);
+    if (!theme) return notFound(res, "Theme not found");
+
+    if (theme.imageKeyDark) {
+      const storage = await getStorage();
+      await storage.remove(theme.imageKeyDark).catch(() => {});
+      theme.imageKeyDark = null;
+      theme.imageMimeTypeDark = null;
       await theme.save();
     }
 
@@ -232,10 +301,43 @@ themesRouter.get(
         "Content-Type": theme.imageMimeType || "application/octet-stream",
         "Cache-Control": "public, max-age=604800, immutable",
         "Content-Length": String(size),
+        // See routes/cms.js's equivalent serve route for why: defense-in
+        // -depth for a direct-navigation SVG open, on top of upload-time
+        // sanitization.
+        "Content-Security-Policy": "script-src 'none'",
+        "X-Content-Type-Options": "nosniff",
       });
       stream.pipe(res);
     } catch (err) {
       console.error("Failed to stream theme image:", err);
+      notFound(res, "Image not found in storage");
+    }
+  })
+);
+
+// Public, unauthenticated — mirrors GET /:id/image exactly, just for the
+// optional dark-mode variant.
+themesRouter.get(
+  "/:id/image-dark",
+  asyncHandler(async (req, res) => {
+    await connectDB();
+    const theme = await Theme.findById(req.params.id);
+    if (!theme || !theme.imageKeyDark) return notFound(res, "Image not found");
+    const storage = await getStorage();
+    if (!(await storage.exists(theme.imageKeyDark))) return notFound(res, "Image not found in storage");
+
+    try {
+      const { stream, size } = await storage.createReadStream(theme.imageKeyDark, null);
+      res.writeHead(200, {
+        "Content-Type": theme.imageMimeTypeDark || "application/octet-stream",
+        "Cache-Control": "public, max-age=604800, immutable",
+        "Content-Length": String(size),
+        "Content-Security-Policy": "script-src 'none'",
+        "X-Content-Type-Options": "nosniff",
+      });
+      stream.pipe(res);
+    } catch (err) {
+      console.error("Failed to stream theme dark image:", err);
       notFound(res, "Image not found in storage");
     }
   })

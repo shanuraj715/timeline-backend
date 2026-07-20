@@ -43,6 +43,14 @@ const ThemeSchema = new Schema(
     // pipeline.
     imageKey: { type: String, default: null },
     imageMimeType: { type: String, default: null },
+    // Optional dark-mode variant of the background image, swapped in via a
+    // CSS custom property (see app/timeline/[slug]/page.jsx's --theme-image
+    // -dark) when the site is in dark mode. Only ever set once imageKey
+    // exists — enforced in routes/themes.js's /:id/image-dark upload route,
+    // not at the schema level (image fields here are written via their own
+    // dedicated upload routes, never through create/update's JSON body).
+    imageKeyDark: { type: String, default: null },
+    imageMimeTypeDark: { type: String, default: null },
     imagePosition: { type: String, enum: ["center", "top", "bottom"], default: "center" },
     // How the background wash's color layer combines with the image:
     // "gradient" (primary->secondary diagonal, the default), "solid" (flat

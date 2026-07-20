@@ -7,6 +7,8 @@ export const updatePlatformSettingsSchema = z.object({
   defaultCreditsOnSignup: z.number().int().min(0).optional(),
   storageUnitBytes: z.number().int().min(1).optional(),
   storageUnitPriceCredits: z.number().int().min(1).optional(),
+  allowGuestViewing: z.boolean().optional(),
+  viewerListUnlockPriceCredits: z.number().int().min(1).optional(),
   maintenanceMode: z
     .object({
       enabled: z.boolean().optional(),

@@ -22,6 +22,14 @@ const PlatformSettingsSchema = new Schema(
     // whole multiple). See routes/timelines.js's storage/purchase route.
     storageUnitBytes: { type: Number, default: 100 * 1024 * 1024, min: 1 },
     storageUnitPriceCredits: { type: Number, default: 10, min: 1 },
+    // Global kill switch for anonymous (not-logged-in) viewing of a Public
+    // timeline — off means every public timeline requires login regardless
+    // of any individual timeline's own settings.guestViewEnabled. See
+    // Timeline.js's visibility field and guards.js's resolveTimelineViewAccess.
+    allowGuestViewing: { type: Boolean, default: false },
+    // One-time price to unlock the "who viewed this timeline" list —
+    // see models/ViewerListUnlock.js and lib/viewerListUnlock.js.
+    viewerListUnlockPriceCredits: { type: Number, default: 20, min: 1 },
     // Read on (almost) every API request via lib/maintenance.js's
     // in-memory cache, not this document directly — see that file for why.
     maintenanceMode: {

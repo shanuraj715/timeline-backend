@@ -13,6 +13,7 @@ import User from "../../models/User.js";
 import Membership from "../../models/Membership.js";
 import Timeline from "../../models/Timeline.js";
 import { permissions } from "../rbac/permissions.js";
+import { getPlatformSettings } from "../platformSettings.js";
 
 /** Verifies the access token cookie and loads the current User doc, or null. */
 export async function getCurrentUser(req) {
@@ -58,6 +59,43 @@ export async function getTimelineAndMembership(slug, userId) {
     status: "active",
   });
   return { timeline, membership };
+}
+
+/**
+ * Resolves whether the current request can VIEW a timeline it has no
+ * Membership on — the "Shared" case (a real Membership exists) is handled
+ * entirely upstream of this function and never reaches it; this is purely
+ * about the "Private"/"Public" visibility layered on top. Only ever used
+ * by the small set of read-only routes a viewer needs to render a
+ * timeline (GET /:slug, /days, /days/:dayKey, /facets, /media,
+ * /media/search, /theme) — every mutating route keeps requiring a real
+ * Membership at sufficient role, completely untouched by this.
+ *
+ * `role: "guest"` deliberately isn't in lib/rbac/permissions.js's ROLES
+ * list — roleAtLeast() returns false for any unrecognized role, so a
+ * guest can never pass a checkPermission() call by construction, not by
+ * convention. Callers on the read routes above still need to branch on
+ * `role === "guest"` explicitly where they'd otherwise expose
+ * member-only data (e.g. other members' identities).
+ *
+ * @returns {Promise<{allowed: boolean, role: string|"guest"|null}>}
+ */
+export async function resolveTimelineViewAccess(timeline, membership, user) {
+  if (membership) return { allowed: true, role: membership.role };
+
+  if (timeline.visibility === "private") return { allowed: false, role: null };
+  if (timeline.visibility === "shared") return { allowed: false, role: null };
+
+  // visibility === "public" from here on.
+  if (user) return { allowed: true, role: "guest" };
+
+  // Fully anonymous — only allowed if both the platform-wide switch and
+  // this timeline's own opt-in are on.
+  const settings = await getPlatformSettings();
+  if (settings.allowGuestViewing && timeline.settings?.guestViewEnabled) {
+    return { allowed: true, role: "guest" };
+  }
+  return { allowed: false, role: null };
 }
 
 /**
@@ -112,6 +150,24 @@ export async function requirePermission(req, res, key) {
   }
   if (user.role === "superadmin") return user;
   if (user.role === "admin" && user.permissions.includes(key)) return user;
+  forbidden(res, "You do not have permission to do this");
+  return null;
+}
+
+/**
+ * Same contract as requirePermission, but passes if the account holds ANY
+ * of the given keys — for routes shared by more than one admin-panel tab
+ * (e.g. the CMS media upload endpoint, used by both the Pages rich-text
+ * editor and the Homepage image fields).
+ */
+export async function requireAnyPermission(req, res, keys) {
+  const user = await getCurrentUser(req);
+  if (!user) {
+    unauthorized(res);
+    return null;
+  }
+  if (user.role === "superadmin") return user;
+  if (user.role === "admin" && keys.some((key) => user.permissions.includes(key))) return user;
   forbidden(res, "You do not have permission to do this");
   return null;
 }

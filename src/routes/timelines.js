@@ -19,6 +19,8 @@ import TimelineThemeOverride from "../models/TimelineThemeOverride.js";
 import { ensureThemeUnlocked } from "../lib/themeUnlock.js";
 import { serializeTheme } from "./themes.js";
 import StoragePurchase from "../models/StoragePurchase.js";
+import ViewerListUnlock from "../models/ViewerListUnlock.js";
+import { unlockViewerList } from "../lib/viewerListUnlock.js";
 import { getPlatformSettings } from "../lib/platformSettings.js";
 import { getTimelineStorageQuota, getTimelineUsedBytes, formatBytes } from "../lib/storageQuota.js";
 import { purchaseStorageSchema } from "../lib/validation/storage.js";
@@ -34,7 +36,9 @@ import {
   getTimelineAndMembership,
   checkPermission,
   clientIp,
+  resolveTimelineViewAccess,
 } from "../lib/auth/guards.js";
+import TimelineView from "../models/TimelineView.js";
 import { generateUniqueSlug } from "../lib/slug.js";
 import { purgeTimeline } from "../lib/timelinePurge.js";
 import { TRASH_RETENTION_MS } from "../lib/trashRetention.js";
@@ -61,6 +65,35 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 const tokenId = customAlphabet("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", 32);
 const INVITE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+// Shared by every read-only route a viewer needs to render a timeline (see
+// resolveTimelineViewAccess's own doc comment for the exact list and why
+// mutating routes never use this) — resolves the timeline + effective
+// role for the current request, whether that's a real Membership or a
+// Private/Public-derived "guest" role, and writes the 401 itself on
+// failure so call sites can just do
+// `const resolved = await resolveViewableTimeline(req, res); if (!resolved) return;`.
+async function resolveViewableTimeline(req, res) {
+  const user = await getCurrentUser(req);
+  const { slug } = req.params;
+  await connectDB();
+  const timeline = await Timeline.findOne({ slug, deletedAt: null });
+  if (!timeline) {
+    unauthorized(res, "You don't have access to this timeline");
+    return null;
+  }
+
+  const membership = user
+    ? await Membership.findOne({ timelineId: timeline._id, userId: user._id, status: "active" })
+    : null;
+  const access = await resolveTimelineViewAccess(timeline, membership, user);
+  if (!access.allowed) {
+    unauthorized(res, "You don't have access to this timeline");
+    return null;
+  }
+
+  return { user, timeline, role: access.role };
+}
 
 timelinesRouter.get(
   "/",
@@ -380,12 +413,25 @@ timelinesRouter.delete(
 timelinesRouter.get(
   "/:slug",
   asyncHandler(async (req, res) => {
-    const user = await getCurrentUser(req);
-    if (!user) return unauthorized(res);
+    const resolved = await resolveViewableTimeline(req, res);
+    if (!resolved) return;
+    const { user, timeline, role } = resolved;
 
-    const { slug } = req.params;
-    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
-    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+    // Fire-and-forget view recording — never blocks the response. A guest
+    // (role: "guest") who's logged in gets an attributed row; a fully
+    // anonymous viewer only bumps the rough aggregate counter. The owner's
+    // own views are never recorded (see models/TimelineView.js).
+    if (user && !user._id.equals(timeline.ownerId)) {
+      TimelineView.updateOne(
+        { timelineId: timeline._id, userId: user._id },
+        { $inc: { viewCount: 1 }, $set: { lastViewedAt: new Date() } },
+        { upsert: true }
+      ).catch((err) => console.error("Failed to record timeline view:", err));
+    } else if (!user) {
+      Timeline.updateOne({ _id: timeline._id }, { $inc: { guestViewCount: 1 } }).catch((err) =>
+        console.error("Failed to record guest timeline view:", err)
+      );
+    }
 
     await timeline.populate("coverMediaId");
 
@@ -411,13 +457,17 @@ timelinesRouter.get(
               thumbnailUrl: `/api/media/${cover._id}/thumbnail?token=${signMediaToken({
                 mediaId: cover._id,
                 timelineId: timeline._id,
-                userId: user._id,
+                userId: user?._id,
               })}`,
             }
           : null,
         settings: timeline.settings,
-        role: membership.role,
-        memberCount,
+        visibility: timeline.visibility,
+        role,
+        // Member count/ownership are only meaningful to people who already
+        // have real access to that information — a guest doesn't get a
+        // headcount of who else can see this timeline.
+        memberCount: role === "guest" ? undefined : memberCount,
         createdAt: timeline.createdAt,
         updatedAt: timeline.updatedAt,
       },
@@ -447,7 +497,16 @@ timelinesRouter.patch(
       if (data.title !== undefined) timeline.title = data.title;
       if (data.description !== undefined) timeline.description = data.description;
       if (data.coverMediaId !== undefined) timeline.coverMediaId = data.coverMediaId || null;
+      if (data.visibility !== undefined) timeline.visibility = data.visibility;
       if (data.settings) Object.assign(timeline.settings, data.settings);
+
+      // guestViewEnabled only ever means anything alongside visibility ===
+      // "public" — silently keeping it true after switching back to
+      // Private/Shared would be a dormant landmine the moment the owner
+      // flips visibility back to Public later, so it's force-cleared here
+      // instead of just being ignored at read time.
+      if (timeline.visibility !== "public") timeline.settings.guestViewEnabled = false;
+
       await timeline.save();
 
       await logActivity({
@@ -465,6 +524,7 @@ timelinesRouter.patch(
           title: timeline.title,
           description: timeline.description,
           slug: timeline.slug,
+          visibility: timeline.visibility,
           settings: timeline.settings,
         },
       });
@@ -556,15 +616,9 @@ const DEFAULT_DAYS_LIMIT = 30;
 timelinesRouter.get(
   "/:slug/days",
   asyncHandler(async (req, res) => {
-    const user = await getCurrentUser(req);
-    if (!user) return unauthorized(res);
-
-    const { slug } = req.params;
-    await connectDB();
-    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
-    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
-
-    if (!checkPermission("viewTimeline", membership, res)) return;
+    const resolved = await resolveViewableTimeline(req, res);
+    if (!resolved) return;
+    const { user, timeline } = resolved;
 
     const direction = req.query.direction;
     const cursor = req.query.cursor;
@@ -602,7 +656,7 @@ timelinesRouter.get(
               thumbnailUrl: `/api/media/${cover._id}/thumbnail?token=${signMediaToken({
                 mediaId: cover._id,
                 timelineId: timeline._id,
-                userId: user._id,
+                userId: user?._id,
               })}`,
             }
           : null,
@@ -629,15 +683,10 @@ timelinesRouter.get(
 timelinesRouter.get(
   "/:slug/days/:dayKey",
   asyncHandler(async (req, res) => {
-    const user = await getCurrentUser(req);
-    if (!user) return unauthorized(res);
-
-    const { slug, dayKey } = req.params;
-    await connectDB();
-    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
-    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
-
-    if (!checkPermission("viewTimeline", membership, res)) return;
+    const resolved = await resolveViewableTimeline(req, res);
+    if (!resolved) return;
+    const { user, timeline } = resolved;
+    const { dayKey } = req.params;
 
     const items = await Media.find({
       timelineId: timeline._id,
@@ -648,7 +697,7 @@ timelinesRouter.get(
 
     res.json({
       media: items.map((item) =>
-        serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user._id }))
+        serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user?._id }))
       ),
     });
   })
@@ -657,15 +706,9 @@ timelinesRouter.get(
 timelinesRouter.get(
   "/:slug/facets",
   asyncHandler(async (req, res) => {
-    const user = await getCurrentUser(req);
-    if (!user) return unauthorized(res);
-
-    const { slug } = req.params;
-    await connectDB();
-    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
-    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
-
-    if (!checkPermission("search", membership, res)) return;
+    const resolved = await resolveViewableTimeline(req, res);
+    if (!resolved) return;
+    const { timeline } = resolved;
 
     const baseQuery = { timelineId: timeline._id, deletedAt: null, processingStatus: "ready" };
 
@@ -1033,15 +1076,9 @@ timelinesRouter.delete(
 timelinesRouter.get(
   "/:slug/media",
   asyncHandler(async (req, res) => {
-    const user = await getCurrentUser(req);
-    if (!user) return unauthorized(res);
-
-    const { slug } = req.params;
-    await connectDB();
-    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
-    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
-
-    if (!checkPermission("viewTimeline", membership, res)) return;
+    const resolved = await resolveViewableTimeline(req, res);
+    if (!resolved) return;
+    const { user, timeline } = resolved;
 
     const status = req.query.status; // pending | processing | ready | failed | undefined (all)
 
@@ -1067,7 +1104,7 @@ timelinesRouter.get(
 
         return res.json({
           media: items.map((item) =>
-            serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user._id }))
+            serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user?._id }))
           ),
           page,
           pageCount: Math.max(Math.ceil(total / limit), 1),
@@ -1090,7 +1127,7 @@ timelinesRouter.get(
 
       res.json({
         media: cursorPage.map((item) =>
-          serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user._id }))
+          serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user?._id }))
         ),
         hasMore,
         nextCursor: hasMore ? cursorPage[cursorPage.length - 1].createdAt.toISOString() : null,
@@ -1353,15 +1390,9 @@ async function processOneUpload({ file, clientDate, timeline, userId, ip }) {
 timelinesRouter.get(
   "/:slug/media/search",
   asyncHandler(async (req, res) => {
-    const user = await getCurrentUser(req);
-    if (!user) return unauthorized(res);
-
-    const { slug } = req.params;
-    await connectDB();
-    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
-    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
-
-    if (!checkPermission("search", membership, res)) return;
+    const resolved = await resolveViewableTimeline(req, res);
+    if (!resolved) return;
+    const { user, timeline } = resolved;
 
     const raw = {
       q: req.query.q || undefined,
@@ -1431,7 +1462,7 @@ timelinesRouter.get(
 
     res.json({
       results: page.map((item) =>
-        serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user._id }))
+        serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user?._id }))
       ),
       hasMore,
       nextCursor: hasMore ? page[page.length - 1].captureDate.toISOString() : null,
@@ -1486,15 +1517,9 @@ timelinesRouter.get(
 timelinesRouter.get(
   "/:slug/theme",
   asyncHandler(async (req, res) => {
-    const user = await getCurrentUser(req);
-    if (!user) return unauthorized(res);
-
-    const { slug } = req.params;
-    await connectDB();
-    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
-    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
-
-    if (!checkPermission("viewTimeline", membership, res)) return;
+    const resolved = await resolveViewableTimeline(req, res);
+    if (!resolved) return;
+    const { timeline } = resolved;
 
     const [baseTheme, overrides] = await Promise.all([
       timeline.themeId ? Theme.findById(timeline.themeId) : null,
@@ -1793,6 +1818,98 @@ timelinesRouter.post(
       });
     } catch (err) {
       serverError(res, err, "Failed to purchase storage");
+    }
+  })
+);
+
+// ---- Viewer analytics (owner-only, paid) ----
+// "Who viewed this timeline" — free to check whether it's unlocked, but the
+// named list itself only ever appears once ViewerListUnlock exists for
+// this timeline (see lib/viewerListUnlock.js). guestViewCount (anonymous,
+// not-logged-in views) is always visible regardless of unlock state — it's
+// a rough aggregate, not attributable to anyone, so there's nothing to
+// paywall about it.
+
+timelinesRouter.get(
+  "/:slug/viewers",
+  asyncHandler(async (req, res) => {
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("viewViewerAnalytics", membership, res)) return;
+
+    const unlock = await ViewerListUnlock.findOne({ timelineId: timeline._id });
+    if (!unlock) {
+      const settings = await getPlatformSettings();
+      return res.json({
+        unlocked: false,
+        priceCredits: settings.viewerListUnlockPriceCredits,
+        namedViewers: [],
+        guestViewCount: timeline.guestViewCount,
+      });
+    }
+
+    const views = await TimelineView.find({ timelineId: timeline._id })
+      .populate("userId", "name email avatarUrl")
+      .sort({ lastViewedAt: -1 })
+      .lean();
+
+    res.json({
+      unlocked: true,
+      namedViewers: views
+        .filter((v) => v.userId) // guard against a since-deleted account
+        .map((v) => ({
+          userId: v.userId._id.toString(),
+          name: v.userId.name,
+          email: v.userId.email,
+          avatarUrl: v.userId.avatarUrl,
+          viewCount: v.viewCount,
+          lastViewedAt: v.lastViewedAt,
+        })),
+      guestViewCount: timeline.guestViewCount,
+    });
+  })
+);
+
+timelinesRouter.post(
+  "/:slug/viewers/unlock",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+
+    if (!checkPermission("viewViewerAnalytics", membership, res)) return;
+
+    try {
+      const settings = await getPlatformSettings();
+      const result = await unlockViewerList(timeline._id, settings.viewerListUnlockPriceCredits, user);
+      if (!result.ok) return badRequest(res, result.error);
+
+      await logActivity({
+        userId: user._id,
+        timelineId: timeline._id,
+        action: "timeline_viewer_list_unlocked",
+        targetType: "timeline",
+        targetId: timeline._id,
+        metadata: { creditsSpent: settings.viewerListUnlockPriceCredits },
+        ip: clientIp(req),
+      });
+
+      const updatedUser = await User.findById(user._id);
+      res.json({ ok: true, credits: updatedUser.credits });
+    } catch (err) {
+      serverError(res, err, "Failed to unlock the viewer list");
     }
   })
 );

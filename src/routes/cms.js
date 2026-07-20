@@ -6,11 +6,15 @@ import NavItem from "../models/NavItem.js";
 import FooterColumn from "../models/FooterColumn.js";
 import Page from "../models/Page.js";
 import { navItemSchema, navItemReorderSchema, footerColumnSchema, footerColumnReorderSchema, createPageSchema, updatePageSchema } from "../lib/validation/cms.js";
+import { updateHomepageContentSchema } from "../lib/validation/homepageContent.js";
+import { getHomepageContent, updateHomepageContent } from "../lib/homepageContent.js";
+import { updateBrandingSettingsSchema } from "../lib/validation/branding.js";
+import { getBrandingSettings, updateBrandingSettings } from "../lib/brandingSettings.js";
 import { parseJson, badRequest, serverError } from "../lib/apiError.js";
-import { requirePermission, notFound } from "../lib/auth/guards.js";
+import { requirePermission, requireAnyPermission, notFound } from "../lib/auth/guards.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
-import { validateMediaFile } from "../lib/media/fileValidation.js";
+import { validateMediaFile, sanitizeSvgBuffer } from "../lib/media/fileValidation.js";
 import { getStorage } from "../lib/storage/index.js";
 import CmsMedia from "../models/CmsMedia.js";
 
@@ -43,6 +47,7 @@ const EXTENSION_MIME = {
   ".heic": "image/heic",
   ".heif": "image/heif",
   ".tiff": "image/tiff",
+  ".svg": "image/svg+xml",
   ".mp4": "video/mp4",
   ".mov": "video/quicktime",
   ".webm": "video/webm",
@@ -314,6 +319,76 @@ cmsRouter.delete(
   })
 );
 
+// ---- Homepage (admin) ----
+// Singleton document (see lib/homepageContent.js) — no list, no :id, admin
+// edits go live immediately (no draft/published state, unlike Page above).
+
+cmsRouter.get(
+  "/homepage",
+  asyncHandler(async (req, res) => {
+    const admin = await requirePermission(req, res, "content.homepage");
+    if (!admin) return;
+    await connectDB();
+    const homepage = await getHomepageContent();
+    res.json({ homepage });
+  })
+);
+
+cmsRouter.put(
+  "/homepage",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+    const admin = await requirePermission(req, res, "content.homepage");
+    if (!admin) return;
+
+    const data = parseJson(req, res, updateHomepageContentSchema);
+    if (!data) return;
+
+    try {
+      await connectDB();
+      const homepage = await updateHomepageContent(data);
+      res.json({ homepage });
+    } catch (err) {
+      serverError(res, err, "Failed to update homepage content");
+    }
+  })
+);
+
+// ---- Branding (admin) ----
+// Singleton document (see lib/brandingSettings.js) — same shape as Homepage
+// above: no list, no :id, admin edits go live immediately.
+
+cmsRouter.get(
+  "/branding",
+  asyncHandler(async (req, res) => {
+    const admin = await requirePermission(req, res, "content.branding");
+    if (!admin) return;
+    await connectDB();
+    const branding = await getBrandingSettings();
+    res.json({ branding });
+  })
+);
+
+cmsRouter.put(
+  "/branding",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+    const admin = await requirePermission(req, res, "content.branding");
+    if (!admin) return;
+
+    const data = parseJson(req, res, updateBrandingSettingsSchema);
+    if (!data) return;
+
+    try {
+      await connectDB();
+      const branding = await updateBrandingSettings(data);
+      res.json({ branding });
+    } catch (err) {
+      serverError(res, err, "Failed to update branding");
+    }
+  })
+);
+
 // ---- Page content media (image/video uploads for the rich-text editor) ----
 
 cmsRouter.post(
@@ -321,18 +396,23 @@ cmsRouter.post(
   uploadCmsMedia.single("file"),
   asyncHandler(async (req, res) => {
     if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
-    const admin = await requirePermission(req, res, "content.pages");
+    // Shared upload endpoint — used by the Pages rich-text editor and every
+    // dedicated image field (Homepage, Branding), so any one permission is
+    // enough.
+    const admin = await requireAnyPermission(req, res, ["content.pages", "content.homepage", "content.branding"]);
     if (!admin) return;
 
     if (!req.file) return badRequest(res, "No file was provided");
 
-    const validation = await validateMediaFile(req.file.buffer);
+    const validation = await validateMediaFile(req.file.buffer, { allowSvg: true });
     if (!validation.valid) return badRequest(res, validation.reason || "Unsupported file type");
+
+    const fileBuffer = validation.mime === "image/svg+xml" ? sanitizeSvgBuffer(req.file.buffer) : req.file.buffer;
 
     const filename = `${crypto.randomUUID()}${validation.extension}`;
     const key = cmsMediaKey(filename);
     const storage = await getStorage();
-    await storage.write(key, req.file.buffer);
+    await storage.write(key, fileBuffer);
 
     await connectDB();
     await CmsMedia.create({
@@ -340,7 +420,7 @@ cmsRouter.post(
       filename,
       mime: validation.mime,
       type: validation.type,
-      size: req.file.buffer.length,
+      size: fileBuffer.length,
       uploadedByUserId: admin._id,
     });
 
@@ -373,6 +453,13 @@ cmsRouter.get(
         "Content-Type": mimeForFilename(req.params.filename),
         "Cache-Control": "public, max-age=604800, immutable",
         "Content-Length": String(size),
+        // Belt-and-suspenders for the SVG case (already sanitized before
+        // storage, see the upload route above): a browser navigated
+        // straight to this URL treats an SVG as its own document rather
+        // than an <img>, which is the one context where an embedded
+        // <script> would otherwise still run. This blocks that regardless.
+        "Content-Security-Policy": "script-src 'none'",
+        "X-Content-Type-Options": "nosniff",
       });
       stream.pipe(res);
     } catch (err) {
@@ -395,6 +482,9 @@ publicCmsRouter.get(
         label: i.label,
         url: i.url,
         openInNewTab: i.openInNewTab,
+        showOnMobile: i.showOnMobile,
+        showOnTablet: i.showOnTablet,
+        showOnDesktop: i.showOnDesktop,
         children: i.children
           .filter((c) => c.enabled)
           .sort((a, b) => a.order - b.order)
@@ -441,5 +531,23 @@ publicCmsRouter.get(
         publishedAt: page.publishedAt,
       },
     });
+  })
+);
+
+publicCmsRouter.get(
+  "/homepage",
+  asyncHandler(async (req, res) => {
+    await connectDB();
+    const homepage = await getHomepageContent();
+    res.json({ homepage });
+  })
+);
+
+publicCmsRouter.get(
+  "/branding",
+  asyncHandler(async (req, res) => {
+    await connectDB();
+    const branding = await getBrandingSettings();
+    res.json({ branding });
   })
 );

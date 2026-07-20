@@ -14,6 +14,9 @@ export const navItemSchema = z.object({
   order: z.number().int().default(0),
   openInNewTab: z.boolean().default(false),
   enabled: z.boolean().default(true),
+  showOnMobile: z.boolean().default(true),
+  showOnTablet: z.boolean().default(true),
+  showOnDesktop: z.boolean().default(true),
   children: z.array(childLinkSchema).max(20).default([]),
 });
 

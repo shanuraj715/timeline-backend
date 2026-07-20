@@ -9,10 +9,12 @@ export const updateTimelineSchema = z.object({
   title: z.string().trim().min(1).max(120).optional(),
   description: z.string().trim().max(2000).optional(),
   coverMediaId: z.string().length(24).nullable().optional(),
+  visibility: z.enum(["private", "shared", "public"]).optional(),
   settings: z
     .object({
       allowMemberUploads: z.boolean().optional(),
       defaultRole: z.enum(["viewer", "editor"]).optional(),
+      guestViewEnabled: z.boolean().optional(),
     })
     .optional(),
 });
