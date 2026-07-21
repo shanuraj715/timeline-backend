@@ -522,9 +522,8 @@ authRouter.get(
         metadata: { app },
       });
 
-      const cookieDomain = crossSubdomainCookieDomain();
-      setAccessCookie(res, accessToken, { domain: cookieDomain });
-      setRefreshCookie(res, refreshToken, { rememberMe: true, domain: cookieDomain });
+      setAccessCookie(res, accessToken);
+      setRefreshCookie(res, refreshToken, { rememberMe: true });
       res.redirect(app === "admin" ? redirectAppUrl : `${redirectAppUrl}/dashboard`);
     } catch (err) {
       console.error("Google OAuth callback failed:", err);

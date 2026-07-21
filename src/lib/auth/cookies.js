@@ -24,31 +24,33 @@ export function crossSubdomainCookieDomain() {
 // SECONDS — the values below are deliberately *1000 versus the source to
 // preserve the exact same real expiry (15 minutes / 30 days), not a typo.
 
-// `domain` is only ever passed by the Google OAuth callback (see routes/auth.js)
-// — that's the one path where the response setting this cookie can be on a
-// different subdomain than the app the browser ends up on (Google's redirect
-// always lands on APP_URL, but the login may have started from the admin
-// panel's own subdomain). Every other caller is a same-origin fetch/XHR from
-// whichever app the user is already on, so a host-only cookie is correct and
-// deliberately left as the default there.
-export function setAccessCookie(res, token, { domain } = {}) {
+// Always applied, not just from the Google OAuth callback — a cookie's
+// identity in the browser's jar is (name, domain, path), so if even one
+// login path (e.g. Google) ever sets this cookie with a domain and another
+// (e.g. password login) sets it host-only, the browser ends up holding two
+// separate "tl_access" entries for the same host and sends both on the next
+// request. Which one the server actually reads back is unspecified, so a
+// stale/expired one from an earlier session can silently win. Using the same
+// domain unconditionally means every login path writes to the exact same
+// jar entry, so a new login always cleanly replaces whatever was there.
+export function setAccessCookie(res, token) {
   res.cookie(ACCESS_COOKIE, token, {
     httpOnly: true,
     secure: isProd,
     sameSite: "lax",
     path: "/",
-    domain,
+    domain: crossSubdomainCookieDomain(),
     maxAge: 15 * 60 * 1000, // 15 minutes, mirrors the JWT's own expiry
   });
 }
 
-export function setRefreshCookie(res, token, { rememberMe, domain } = {}) {
+export function setRefreshCookie(res, token, { rememberMe }) {
   res.cookie(REFRESH_COOKIE, token, {
     httpOnly: true,
     secure: isProd,
     sameSite: "strict",
     path: "/api/auth",
-    domain,
+    domain: crossSubdomainCookieDomain(),
     // Omitting maxAge for non-"remember me" logins makes it a session
     // cookie that clears when the browser closes; the Session document's
     // own expiresAt is the durable backstop either way.
