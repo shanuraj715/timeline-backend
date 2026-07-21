@@ -29,10 +29,19 @@ import { bootstrapDefaultProvider } from "./lib/storage/index.js";
 import { startStorageWorker } from "./lib/storage/worker.js";
 import { bootstrapEmailTemplates } from "./lib/email/bootstrap.js";
 import { bootstrapAdPlacements } from "./lib/adPlacements.js";
+import { API_VERSION } from "./lib/version.js";
 
 const PORT = process.env.PORT || 4000;
 
 const app = express();
+
+// Set on every response, not just /api/version, so the running version is
+// always visible (browser devtools, curl -I, monitoring) without a
+// dedicated request for it.
+app.use((req, res, next) => {
+  res.setHeader("X-API-Version", API_VERSION);
+  next();
+});
 
 // The `verify` hook stashes the raw request bytes on req.rawBody for the
 // Razorpay webhook route, which must validate its HMAC signature against
@@ -56,6 +65,10 @@ app.use((err, req, res, next) => {
 
 app.get("/api/health", (req, res) => {
   res.json({ ok: true, service: "timeline-backend" });
+});
+
+app.get("/api/version", (req, res) => {
+  res.json({ version: API_VERSION });
 });
 
 // Mounted before every other route so a maintenance-mode block always wins;
