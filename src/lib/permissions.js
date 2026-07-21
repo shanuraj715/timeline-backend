@@ -17,6 +17,7 @@ export const PERMISSION_GROUPS = [
       { key: "content.navigation", label: "Navigation" },
       { key: "content.footer", label: "Footer" },
       { key: "content.pages", label: "Pages" },
+      { key: "content.sitemap", label: "Sitemap" },
       { key: "content.homepage", label: "Homepage" },
       { key: "content.whyChooseUs", label: "Why MyTimelyne" },
       { key: "content.branding", label: "Branding" },
