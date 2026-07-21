@@ -23,6 +23,8 @@ import { googleOAuthRouter, publicGoogleOAuthRouter } from "./routes/googleOAuth
 import { currencyRouter, publicCurrencyRouter } from "./routes/currency.js";
 import { adminAccountsRouter } from "./routes/adminAccounts.js";
 import { adsRouter, publicAdsRouter } from "./routes/ads.js";
+import { analyticsSettingsRouter, publicAnalyticsSettingsRouter } from "./routes/analyticsSettings.js";
+import { sitemapRouter, publicSitemapRouter } from "./routes/sitemap.js";
 import { serverError } from "./lib/apiError.js";
 import { maintenanceGate } from "./lib/maintenanceGate.js";
 import { bootstrapDefaultProvider } from "./lib/storage/index.js";
@@ -92,6 +94,8 @@ app.use("/api/themes", themesRouter);
 app.use("/api/settings", settingsRouter);
 app.use("/api/coupons", couponsRouter);
 app.use("/api/recaptcha", recaptchaRouter);
+app.use("/api/analytics-settings", analyticsSettingsRouter);
+app.use("/api/sitemap", sitemapRouter);
 app.use("/api/storage", storageRouter);
 app.use("/api/email-templates", emailTemplatesRouter);
 app.use("/api/email-providers", emailProvidersRouter);
@@ -106,6 +110,8 @@ app.use("/api/public/pricing", publicPricingRouter);
 app.use("/api/public/payment-gateways", publicPaymentsRouter);
 app.use("/api/public/recaptcha", publicRecaptchaRouter);
 app.use("/api/public/google-oauth", publicGoogleOAuthRouter);
+app.use("/api/public/analytics-settings", publicAnalyticsSettingsRouter);
+app.use("/api/public/sitemap", publicSitemapRouter);
 app.use("/api/public/currencies", publicCurrencyRouter);
 
 // Catches anything forwarded via asyncHandler's `.catch(next)` from any
