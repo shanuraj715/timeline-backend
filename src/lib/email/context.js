@@ -25,7 +25,7 @@ export function buildVariableContext(user, vars = {}) {
 
   return {
     ...userVars,
-    site_name: "Timeline",
+    site_name: "MyTimelyne",
     app_url: process.env.APP_URL || "",
     current_year: String(new Date().getFullYear()),
     ...vars,
