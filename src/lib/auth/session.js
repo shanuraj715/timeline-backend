@@ -13,7 +13,7 @@ export function hashToken(token) {
   return crypto.createHash("sha256").update(token).digest("hex");
 }
 
-export async function createSession({ userId, device, userAgent, ip, rememberMe }) {
+export async function createSession({ userId, device, userAgent, ip, rememberMe, platform = "web" }) {
   const { token, hash } = generateRefreshToken();
   const expiresAt = new Date(Date.now() + (rememberMe ? REMEMBER_ME_TTL_MS : DEFAULT_TTL_MS));
 
@@ -24,6 +24,7 @@ export async function createSession({ userId, device, userAgent, ip, rememberMe 
     userAgent,
     ip,
     rememberMe,
+    platform,
     expiresAt,
   });
 

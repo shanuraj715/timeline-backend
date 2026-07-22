@@ -23,6 +23,17 @@ export function verifyCsrf(req) {
   const method = req.method.toUpperCase();
   if (["GET", "HEAD", "OPTIONS"].includes(method)) return true;
 
+  // CSRF exploits a browser's *ambient* cookie-sending behavior — a
+  // cross-site page can make the browser attach cookies to a request
+  // without the victim's own code ever touching them. A Bearer token (the
+  // mobile app) has no such ambient channel: it must be deliberately read
+  // from secure storage and attached by the client's own code, so none of
+  // the Origin/Referer/header checks below are meaningful for it. Only the
+  // header's *presence* is checked here, not its validity — a forged or
+  // expired bearer token still fails authentication downstream in
+  // getCurrentUser, exactly like any other bad credential would.
+  if (req.headers.authorization?.startsWith("Bearer ")) return true;
+
   const header = req.headers[REQUIRED_HEADER];
   if (header !== REQUIRED_HEADER_VALUE) return false;
 

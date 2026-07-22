@@ -42,6 +42,7 @@ import { rateLimit } from "../lib/auth/rateLimit.js";
 import { recordFailedLogin, recordSuccessfulLogin, lockoutMessage } from "../lib/auth/lockout.js";
 import { logSecurityEvent } from "../lib/logger.js";
 import { getCurrentUser, unauthorized, notFound, clientIp } from "../lib/auth/guards.js";
+import { getClientPlatform, isMobileClient } from "../lib/auth/platform.js";
 import { verifyRecaptcha } from "../lib/auth/recaptcha.js";
 import { verifyCsrf } from "../lib/auth/csrf.js";
 import { asyncHandler } from "../lib/asyncHandler.js";
@@ -56,6 +57,17 @@ import { processAvatarImage, AvatarNotSquareError } from "../lib/media/avatar.js
 export const authRouter = Router();
 
 const avatarUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+
+// describeDevice()'s heuristics are tuned for a browser's own User-Agent
+// string — a mobile HTTP client's UA (Expo/okhttp/etc.) doesn't match any
+// of them, so it'd fall through to an unhelpful generic label. The app
+// name is a clearer "what is this session" label than trying to parse a
+// non-browser UA at all.
+function sessionDevice(userAgent, platform) {
+  if (platform === "android") return "MyTimelyne for Android";
+  if (platform === "ios") return "MyTimelyne for iOS";
+  return describeDevice(userAgent);
+}
 
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes, matches otp_expiry_minutes below
 const OTP_MAX_ATTEMPTS = 5;
@@ -229,20 +241,33 @@ authRouter.post(
 
       await recordSuccessfulLogin(user);
 
+      const platform = getClientPlatform(req);
+      const mobile = platform !== "web";
+      // A signed-out phone is a worse experience than a signed-out browser
+      // tab — mobile has no "remember me" checkbox of its own, it's just
+      // always on, the same way most native apps stay signed in until you
+      // explicitly log out.
+      const rememberMe = mobile ? true : Boolean(data.rememberMe);
+
       const { token: refreshToken } = await createSession({
         userId: user._id,
-        device: describeDevice(userAgent),
+        device: sessionDevice(userAgent, platform),
         userAgent,
         ip,
-        rememberMe: Boolean(data.rememberMe),
+        rememberMe,
+        platform,
       });
       const accessToken = await signAccessToken({ userId: user._id, role: user.role });
 
       await logSecurityEvent({ userId: user._id, action: "login_success", ip, userAgent });
 
-      setAccessCookie(res, accessToken);
-      setRefreshCookie(res, refreshToken, { rememberMe: Boolean(data.rememberMe) });
-      res.json({ user: user.toSafeJSON() });
+      if (mobile) {
+        res.json({ user: user.toSafeJSON(), accessToken, refreshToken });
+      } else {
+        setAccessCookie(res, accessToken);
+        setRefreshCookie(res, refreshToken, { rememberMe });
+        res.json({ user: user.toSafeJSON() });
+      }
     } catch (err) {
       serverError(res, err, "Failed to log in");
     }
@@ -302,12 +327,16 @@ authRouter.post(
         lastLoginAt: new Date(),
       });
 
+      const platform = getClientPlatform(req);
+      const mobile = platform !== "web";
+
       const { token: refreshToken } = await createSession({
         userId: user._id,
-        device: describeDevice(userAgent),
+        device: sessionDevice(userAgent, platform),
         userAgent,
         ip,
         rememberMe: true,
+        platform,
       });
       const accessToken = await signAccessToken({ userId: user._id, role: user.role });
 
@@ -318,9 +347,13 @@ authRouter.post(
       // use the app (see the User model comment on emailVerified).
       issueEmailVerification(user).catch(() => {});
 
-      setAccessCookie(res, accessToken);
-      setRefreshCookie(res, refreshToken, { rememberMe: true });
-      res.status(201).json({ user: user.toSafeJSON() });
+      if (mobile) {
+        res.status(201).json({ user: user.toSafeJSON(), accessToken, refreshToken });
+      } else {
+        setAccessCookie(res, accessToken);
+        setRefreshCookie(res, refreshToken, { rememberMe: true });
+        res.status(201).json({ user: user.toSafeJSON() });
+      }
     } catch (err) {
       if (err?.code === 11000) return badRequest(res, "An account with this email already exists");
       serverError(res, err, "Failed to register");
@@ -545,7 +578,11 @@ authRouter.post(
 
     await connectDB();
 
-    const refreshToken = req.cookies?.[REFRESH_COOKIE];
+    const mobile = isMobileClient(req);
+    // Mobile has no refresh cookie to read (see login/register above) — it
+    // sends the refresh token it stored from its own last login/refresh
+    // response in the body instead.
+    const refreshToken = req.cookies?.[REFRESH_COOKIE] || (mobile ? req.body?.refreshToken : null);
     if (!refreshToken) return unauthorized(res, "No active session");
 
     const ip = requestIp(req);
@@ -553,7 +590,7 @@ authRouter.post(
     const result = await rotateRefreshToken(refreshToken);
 
     if (!result) {
-      clearAuthCookies(res);
+      if (!mobile) clearAuthCookies(res);
       return unauthorized(res, "Session expired, please log in again");
     }
 
@@ -564,21 +601,25 @@ authRouter.post(
         ip,
         metadata: { note: "All sessions revoked as a precaution." },
       });
-      clearAuthCookies(res);
+      if (!mobile) clearAuthCookies(res);
       return unauthorized(res, "Session invalidated for your security, please log in again");
     }
 
     const user = await User.findById(result.session.userId);
     if (!user) {
-      clearAuthCookies(res);
+      if (!mobile) clearAuthCookies(res);
       return unauthorized(res, "Account no longer exists");
     }
 
     const accessToken = await signAccessToken({ userId: user._id, role: user.role });
 
-    setAccessCookie(res, accessToken);
-    setRefreshCookie(res, result.token, { rememberMe: result.session.rememberMe });
-    res.json({ ok: true });
+    if (mobile) {
+      res.json({ ok: true, accessToken, refreshToken: result.token });
+    } else {
+      setAccessCookie(res, accessToken);
+      setRefreshCookie(res, result.token, { rememberMe: result.session.rememberMe });
+      res.json({ ok: true });
+    }
   })
 );
 
@@ -594,7 +635,8 @@ authRouter.post(
     // deliberately permissive here rather than relying on the global
     // malformed-JSON error middleware, matching that fallback intent.
     const body = req.body || {};
-    const refreshToken = req.cookies?.[REFRESH_COOKIE];
+    const mobile = isMobileClient(req);
+    const refreshToken = req.cookies?.[REFRESH_COOKIE] || (mobile ? body.refreshToken : null);
     const user = await getCurrentUser(req);
     const ip = clientIp(req);
 
@@ -612,7 +654,9 @@ authRouter.post(
       });
     }
 
-    clearAuthCookies(res);
+    // Nothing to clear server-side for mobile — it has no cookies, it just
+    // discards its own locally stored tokens after this call resolves.
+    if (!mobile) clearAuthCookies(res);
     res.json({ ok: true });
   })
 );
@@ -1101,6 +1145,7 @@ authRouter.get(
       sessions: sessions.map((s) => ({
         id: s._id.toString(),
         device: s.device,
+        platform: s.platform,
         ip: s.ip,
         rememberMe: s.rememberMe,
         lastUsedAt: s.lastUsedAt,

@@ -15,9 +15,20 @@ import Timeline from "../../models/Timeline.js";
 import { permissions } from "../rbac/permissions.js";
 import { getPlatformSettings } from "../platformSettings.js";
 
-/** Verifies the access token cookie and loads the current User doc, or null. */
+/**
+ * Verifies the access token and loads the current User doc, or null.
+ * Checks the Authorization header first (the mobile app — a bearer token,
+ * not a cookie) and falls back to the web's ACCESS_COOKIE. Same JWT
+ * (jose, signAccessToken/verifyAccessToken), same 15-minute TTL, same
+ * mandatory User lookup either way — a mobile request never touches a
+ * different code path than this one function, so every permission helper
+ * built on top of it (checkPermission, requirePermission, etc.) needs no
+ * changes at all to work for both.
+ */
 export async function getCurrentUser(req) {
-  const token = req.cookies?.[ACCESS_COOKIE];
+  const authHeader = req.headers.authorization;
+  const bearerToken = authHeader?.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  const token = bearerToken || req.cookies?.[ACCESS_COOKIE];
   if (!token) return null;
 
   const claims = await verifyAccessToken(token);
