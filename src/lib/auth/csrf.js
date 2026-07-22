@@ -12,6 +12,8 @@
 // browser's real Origin/Referer headers through unchanged, so this check
 // keeps working exactly as it did when everything was one Next.js project.
 
+import { isMobileClient } from "./platform.js";
+
 const REQUIRED_HEADER = "x-requested-with";
 const REQUIRED_HEADER_VALUE = "timeline-app";
 
@@ -33,6 +35,17 @@ export function verifyCsrf(req) {
   // expired bearer token still fails authentication downstream in
   // getCurrentUser, exactly like any other bad credential would.
   if (req.headers.authorization?.startsWith("Bearer ")) return true;
+
+  // Login/register/forgot-password/etc. run BEFORE the mobile app has a
+  // bearer token at all, so the check above doesn't cover them — but the
+  // same reasoning that protects X-Requested-With below applies here too:
+  // there's no `cors()` middleware in this app approving any origin for a
+  // custom header, so a forged cross-site request can't get a browser to
+  // attach X-Client-Platform either (it'd trigger a preflight this server
+  // never approves, and the browser would refuse to send the real
+  // request). This only skips the CSRF check itself — a wrong password or
+  // invalid token still fails normally downstream.
+  if (isMobileClient(req)) return true;
 
   const header = req.headers[REQUIRED_HEADER];
   if (header !== REQUIRED_HEADER_VALUE) return false;
