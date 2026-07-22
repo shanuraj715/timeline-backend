@@ -23,6 +23,7 @@ import { googleOAuthRouter, publicGoogleOAuthRouter } from "./routes/googleOAuth
 import { currencyRouter, publicCurrencyRouter } from "./routes/currency.js";
 import { adminAccountsRouter } from "./routes/adminAccounts.js";
 import { adsRouter, publicAdsRouter } from "./routes/ads.js";
+import { cacheRouter } from "./routes/cache.js";
 import { analyticsSettingsRouter, publicAnalyticsSettingsRouter } from "./routes/analyticsSettings.js";
 import { sitemapRouter, publicSitemapRouter } from "./routes/sitemap.js";
 import { serverError } from "./lib/apiError.js";
@@ -103,6 +104,7 @@ app.use("/api/google-oauth", googleOAuthRouter);
 app.use("/api/currencies", currencyRouter);
 app.use("/api/admin-accounts", adminAccountsRouter);
 app.use("/api/ads", adsRouter);
+app.use("/api/cache", cacheRouter);
 app.use("/api/public", publicCmsRouter);
 app.use("/api/public/ads", publicAdsRouter);
 app.use("/api/public/feature-flags", publicFeatureFlagsRouter);
