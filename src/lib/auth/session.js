@@ -84,11 +84,14 @@ export async function revokeSessionByToken(rawToken) {
   );
 }
 
-export async function revokeAllSessionsForUser(userId, reason = "logout_everywhere") {
-  await Session.updateMany(
-    { userId, revoked: false },
-    { $set: { revoked: true, revokedReason: reason } }
-  );
+// `exceptSessionId` is what powers "sign out all other devices" (see
+// routes/auth.js's POST /sessions/revoke-others) — the plain logout-
+// everywhere path (routes/auth.js's POST /logout) doesn't pass it, since
+// that one's supposed to end the current session too.
+export async function revokeAllSessionsForUser(userId, reason = "logout_everywhere", { exceptSessionId } = {}) {
+  const filter = { userId, revoked: false };
+  if (exceptSessionId) filter._id = { $ne: exceptSessionId };
+  await Session.updateMany(filter, { $set: { revoked: true, revokedReason: reason } });
 }
 
 export async function listActiveSessions(userId) {

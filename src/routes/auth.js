@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { Router } from "express";
+import multer from "multer";
 import { createRemoteJWKSet, jwtVerify } from "jose";
 import { connectDB } from "../lib/db/connect.js";
 import User from "../models/User.js";
@@ -8,7 +9,7 @@ import PasswordResetOtp from "../models/PasswordResetOtp.js";
 import {
   loginSchema,
   registerSchema,
-  completeProfileSchema,
+  updateProfileSchema,
   changePasswordSchema,
   deleteAccountSchema,
   forgotPasswordSchema,
@@ -48,8 +49,13 @@ import { isFeatureEnabled } from "../lib/featureFlags.js";
 import { sendTemplatedEmail } from "../lib/email/send.js";
 import { getPlatformSettings } from "../lib/platformSettings.js";
 import { getActiveGoogleOAuthClient } from "../lib/googleOAuthSettings.js";
+import { getStorage } from "../lib/storage/index.js";
+import { validateMediaFile } from "../lib/media/fileValidation.js";
+import { processAvatarImage, AvatarNotSquareError } from "../lib/media/avatar.js";
 
 export const authRouter = Router();
+
+const avatarUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const OTP_TTL_MS = 10 * 60 * 1000; // 10 minutes, matches otp_expiry_minutes below
 const OTP_MAX_ATTEMPTS = 5;
@@ -611,13 +617,13 @@ authRouter.post(
   })
 );
 
-// Fills in dob/gender/phone/country after the fact — the one thing a Google
-// signup can't collect during /google/callback (Google's profile scope
-// doesn't carry any of it). Reuses registerSchema's own field rules via
-// completeProfileSchema, so a Google-originated account ends up with
-// exactly the same shape of data a password signup collects up front.
-// Not restricted to accounts that still need it — also doubles as a
-// general "update these profile fields" endpoint since no other one exists.
+// Also used for onboarding (fills in dob/gender/phone/country a Google
+// signup can't collect during /google/callback, since Google's profile
+// scope doesn't carry any of it) and for the dashboard's "Manage profile"
+// page's general field edits (name/dob/gender/phone/country) — every field
+// is optional here (updateProfileSchema) so a request only has to send what
+// it's actually changing; the onboarding page's own form is what actually
+// requires dob/gender before letting the user submit.
 authRouter.patch(
   "/profile",
   asyncHandler(async (req, res) => {
@@ -626,17 +632,114 @@ authRouter.patch(
     const user = await getCurrentUser(req);
     if (!user) return unauthorized(res);
 
-    const data = parseJson(req, res, completeProfileSchema);
+    const data = parseJson(req, res, updateProfileSchema);
     if (!data) return;
 
     await connectDB();
-    user.dob = data.dob;
-    user.gender = data.gender;
-    user.phone = data.phone || null;
-    user.country = data.country || null;
+    if (data.firstName !== undefined) user.firstName = data.firstName;
+    if (data.lastName !== undefined) user.lastName = data.lastName;
+    if (data.firstName !== undefined || data.lastName !== undefined) {
+      user.name = `${data.firstName ?? user.firstName ?? ""} ${data.lastName ?? user.lastName ?? ""}`.trim();
+    }
+    if (data.dob !== undefined) user.dob = data.dob;
+    if (data.gender !== undefined) user.gender = data.gender;
+    if (data.phone !== undefined) user.phone = data.phone || null;
+    if (data.country !== undefined) user.country = data.country || null;
     await user.save();
 
     res.json({ user: user.toSafeJSON() });
+  })
+);
+
+// Square-only by design (see lib/media/avatar.js's AvatarNotSquareError) —
+// rejected rather than auto-cropped, so the user picks/creates an image
+// they're actually happy with instead of the crop silently cutting off
+// part of it. Always re-encoded to webp at a fixed size and stored under a
+// fixed per-user key, so a re-upload just overwrites in place.
+authRouter.post(
+  "/avatar",
+  avatarUpload.single("avatar"),
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    if (!req.file) return badRequest(res, "No image file was provided");
+
+    const validation = await validateMediaFile(req.file.buffer);
+    if (!validation.valid || validation.type !== "image") {
+      return badRequest(res, validation.reason || "File must be a valid image");
+    }
+
+    let processed;
+    try {
+      processed = await processAvatarImage(req.file.buffer);
+    } catch (err) {
+      if (err instanceof AvatarNotSquareError) {
+        return badRequest(res, "Please upload a square image (equal width and height)");
+      }
+      throw err;
+    }
+
+    await connectDB();
+    const avatarKey = `avatars/${user._id}/avatar.webp`;
+    const storage = await getStorage();
+    await storage.write(avatarKey, processed.avatarBuffer);
+
+    user.avatarKey = avatarKey;
+    user.avatarUrl = `/api/auth/avatar/${user._id}`;
+    await user.save();
+
+    res.json({ user: user.toSafeJSON() });
+  })
+);
+
+authRouter.delete(
+  "/avatar",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    await connectDB();
+    if (user.avatarKey) {
+      const storage = await getStorage();
+      await storage.remove(user.avatarKey).catch(() => {});
+      user.avatarKey = null;
+    }
+    user.avatarUrl = null;
+    await user.save();
+
+    res.json({ user: user.toSafeJSON() });
+  })
+);
+
+// Public, unauthenticated — an avatar has to be visible to other timeline
+// members (see routes/timelines.js's `populate(... "name avatarUrl")`
+// call sites), not just its owner, same reasoning as routes/themes.js's
+// theme-image serve route. Only ever returns a self-uploaded avatar; a
+// Google-sourced one is already a full external URL (see the model
+// comment) and never reaches this route at all.
+authRouter.get(
+  "/avatar/:userId",
+  asyncHandler(async (req, res) => {
+    await connectDB();
+    const targetUser = await User.findById(req.params.userId);
+    if (!targetUser || !targetUser.avatarKey) return notFound(res, "Avatar not found");
+
+    const storage = await getStorage();
+    if (!(await storage.exists(targetUser.avatarKey))) return notFound(res, "Avatar not found in storage");
+
+    const { stream, size } = await storage.createReadStream(targetUser.avatarKey, null);
+    res.writeHead(200, {
+      "Content-Type": "image/webp",
+      "Cache-Control": "public, max-age=86400",
+      "Content-Length": String(size),
+      "X-Content-Type-Options": "nosniff",
+    });
+    stream.pipe(res);
   })
 );
 
@@ -1031,6 +1134,33 @@ authRouter.delete(
       ip: clientIp(req),
       metadata: { sessionId: id },
     });
+
+    res.json({ ok: true });
+  })
+);
+
+// Keeps the device making this request signed in and revokes every other
+// active session — distinct from POST /logout's {everywhere:true}, which
+// ends the current session too. Handy after noticing an unrecognized
+// device in the list without that also signing yourself out.
+authRouter.post(
+  "/sessions/revoke-others",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    await connectDB();
+    const currentToken = req.cookies?.[REFRESH_COOKIE];
+    const currentHash = currentToken ? hashToken(currentToken) : null;
+    const currentSession = currentHash ? await Session.findOne({ refreshTokenHash: currentHash }) : null;
+
+    await revokeAllSessionsForUser(user._id, "user_revoked_others", {
+      exceptSessionId: currentSession?._id,
+    });
+
+    await logSecurityEvent({ userId: user._id, action: "sessions_revoked_others", ip: clientIp(req) });
 
     res.json({ ok: true });
   })
