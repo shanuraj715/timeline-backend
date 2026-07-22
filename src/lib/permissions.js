@@ -48,6 +48,7 @@ export const PERMISSION_GROUPS = [
       { key: "platform.flags", label: "Feature flags" },
       { key: "platform.settings", label: "Settings" },
       { key: "platform.admins", label: "Admins" },
+      { key: "platform.cache", label: "Cache" },
     ],
   },
   {
