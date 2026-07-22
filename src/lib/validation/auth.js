@@ -17,7 +17,7 @@ function isAtLeastYearsOld(date, years) {
 }
 
 // Shared by registerSchema (password signup collects these up front) and
-// completeProfileSchema (Google signup collects them after the fact, via
+// updateProfileSchema below (used for both onboarding and later edits, via
 // PATCH /api/auth/profile) — one set of rules for both, so "same data
 // saving process" stays true by construction rather than by convention.
 const profileDetails = {
@@ -46,7 +46,20 @@ export const registerSchema = z.object({
   recaptchaToken: z.string().nullish(),
 });
 
-export const completeProfileSchema = z.object(profileDetails);
+// Used by both the onboarding flow and the dashboard's "Manage profile" page
+// (PATCH /api/auth/profile) — every field is optional so a request can
+// update just one thing (e.g. only country) without having to resend
+// everything else. Onboarding's own form still requires dob/gender before
+// it lets the user submit; this schema only controls what the API itself
+// will accept.
+export const updateProfileSchema = z.object({
+  firstName: z.string().trim().min(1, "First name is required").max(60).optional(),
+  lastName: z.string().trim().min(1, "Last name is required").max(60).optional(),
+  dob: profileDetails.dob.optional(),
+  gender: profileDetails.gender.optional(),
+  phone: profileDetails.phone,
+  country: profileDetails.country,
+});
 
 export const loginSchema = z.object({
   email,

@@ -52,7 +52,18 @@ const UserSchema = new Schema(
     gender: { type: String, enum: ["male", "female", "other", "prefer_not_to_say"], default: null },
     phone: { type: String, trim: true, default: null },
     country: { type: String, trim: true, default: null },
+    // Full external URL for a Google-sourced avatar (payload.picture — see
+    // routes/auth.js's /google/callback), or `/api/auth/avatar/:userId`
+    // once the user uploads their own (see avatarKey below). Either way,
+    // this is what every consumer actually renders.
     avatarUrl: { type: String, default: null },
+    // Storage key for a self-uploaded avatar only — null for a Google
+    // avatar (that image lives on Google's CDN, this project never stores
+    // it). Always a fixed `avatars/{userId}/avatar.webp` path (see
+    // lib/media/avatar.js), so a re-upload overwrites in place rather than
+    // needing old-file cleanup the way theme images (which keep their
+    // original extension) do.
+    avatarKey: { type: String, default: null },
     // "admin" is a limited-permission tier — see lib/permissions.js for the
     // full key catalog and lib/auth/guards.js's requirePermission() for how
     // it's enforced. "superadmin" is a fixed, singular, non-grantable status
