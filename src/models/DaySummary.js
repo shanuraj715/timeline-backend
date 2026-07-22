@@ -14,6 +14,12 @@ const DaySummarySchema = new Schema(
     mediaCount: { type: Number, default: 0 },
     favoriteCount: { type: Number, default: 0 },
     coverMediaId: { type: Schema.Types.ObjectId, ref: "Media", default: null },
+    // The only field on this row not rebuilt by syncDaySummary() below — a
+    // caption for the day itself, set directly by the PATCH /days/:dayKey
+    // route. syncDaySummary only ever $sets the other fields, so this
+    // survives every resync; it's lost only if the day empties out entirely
+    // and its row gets deleted (see syncDaySummary's stat.count === 0 branch).
+    caption: { type: String, trim: true, maxlength: 300, default: "" },
   },
   { timestamps: true }
 );

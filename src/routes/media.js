@@ -59,6 +59,7 @@ mediaRouter.patch(
 
       if (data.title !== undefined) media.title = data.title;
       if (data.description !== undefined) media.description = data.description;
+      if (data.caption !== undefined) media.caption = data.caption;
       if (data.favorite !== undefined) media.favorite = data.favorite;
       if (data.tags !== undefined) media.tags = data.tags;
       if (data.people !== undefined) media.people = data.people;

@@ -27,6 +27,7 @@ import { purchaseStorageSchema } from "../lib/validation/storage.js";
 import { createTimelineSchema, updateTimelineSchema, inviteMemberSchema, updateMemberRoleSchema } from "../lib/validation/timeline.js";
 import { setBaseThemeSchema, createOverrideSchema } from "../lib/validation/themes.js";
 import { searchMediaSchema } from "../lib/validation/media.js";
+import { updateDayCaptionSchema } from "../lib/validation/day.js";
 import { parseJson, serverError, badRequest, fromZodError } from "../lib/apiError.js";
 import {
   getCurrentUser,
@@ -647,6 +648,7 @@ timelinesRouter.get(
         date: row.date,
         mediaCount: row.mediaCount,
         favoriteCount: row.favoriteCount,
+        caption: row.caption,
         cover: cover
           ? {
               id: cover._id.toString(),
@@ -700,6 +702,51 @@ timelinesRouter.get(
         serializeMedia(item, signMediaToken({ mediaId: item._id, timelineId: timeline._id, userId: user?._id }))
       ),
     });
+  })
+);
+
+// A day's caption lives on its DaySummary row rather than on Media, so it
+// can only be set for a day that already has one — i.e. a day with at
+// least one non-trashed, ready piece of media on it. There's no "create an
+// empty day just to caption it" path, matching how days are purely derived
+// (see daySummary.js) rather than being their own first-class resource.
+timelinesRouter.patch(
+  "/:slug/days/:dayKey",
+  asyncHandler(async (req, res) => {
+    if (!verifyCsrf(req)) return badRequest(res, "Request could not be verified");
+
+    const user = await getCurrentUser(req);
+    if (!user) return unauthorized(res);
+
+    const { slug, dayKey } = req.params;
+    await connectDB();
+    const { timeline, membership } = await getTimelineAndMembership(slug, user._id);
+    if (!timeline || !membership) return unauthorized(res, "You don't have access to this timeline");
+    if (!checkPermission("editMediaMetadata", membership, res)) return;
+
+    const data = parseJson(req, res, updateDayCaptionSchema);
+    if (!data) return;
+
+    const day = await DaySummary.findOne({ timelineId: timeline._id, dayKey });
+    if (!day) return notFound(res, "Day not found");
+
+    try {
+      day.caption = data.caption;
+      await day.save();
+
+      await logActivity({
+        userId: user._id,
+        timelineId: timeline._id,
+        action: "day_caption_updated",
+        targetType: "day",
+        targetId: day._id,
+        ip: clientIp(req),
+      });
+
+      res.json({ dayKey: day.dayKey, caption: day.caption });
+    } catch (err) {
+      serverError(res, err, "Failed to update day caption");
+    }
   })
 );
 

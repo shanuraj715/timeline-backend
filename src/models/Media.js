@@ -28,6 +28,10 @@ const MediaSchema = new Schema(
 
     title: { type: String, trim: true, maxlength: 200, default: "" },
     description: { type: String, trim: true, maxlength: 4000, default: "" },
+    // Distinct from title/description — a short line meant to render directly
+    // under the photo/video wherever it's actually being viewed, not tucked
+    // into the Info side panel.
+    caption: { type: String, trim: true, maxlength: 300, default: "" },
     location: {
       name: { type: String, default: "" },
       lat: { type: Number, default: null },

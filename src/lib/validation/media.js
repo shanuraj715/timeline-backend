@@ -3,6 +3,7 @@ import { z } from "zod";
 export const updateMediaSchema = z.object({
   title: z.string().trim().max(200).optional(),
   description: z.string().trim().max(4000).optional(),
+  caption: z.string().trim().max(300).optional(),
   captureDate: z.coerce.date().optional(),
   location: z
     .object({
