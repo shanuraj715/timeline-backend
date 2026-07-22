@@ -53,9 +53,10 @@ const UserSchema = new Schema(
     phone: { type: String, trim: true, default: null },
     country: { type: String, trim: true, default: null },
     // Full external URL for a Google-sourced avatar (payload.picture — see
-    // routes/auth.js's /google/callback), or `/api/auth/avatar/:userId`
-    // once the user uploads their own (see avatarKey below). Either way,
-    // this is what every consumer actually renders.
+    // routes/auth.js's /google/callback), or `/api/auth/avatar/:userId
+    // ?v={avatarVersion}` once the user uploads their own (see avatarKey/
+    // avatarVersion below). Either way, this is what every consumer
+    // actually renders.
     avatarUrl: { type: String, default: null },
     // Storage key for a self-uploaded avatar only — null for a Google
     // avatar (that image lives on Google's CDN, this project never stores
@@ -64,6 +65,16 @@ const UserSchema = new Schema(
     // needing old-file cleanup the way theme images (which keep their
     // original extension) do.
     avatarKey: { type: String, default: null },
+    // Bumped on every avatar upload and baked into the `?v=` query string
+    // of avatarUrl above — the serve route (GET /api/auth/avatar/:userId)
+    // sends a long Cache-Control (see routes/auth.js), which is exactly
+    // what you want for an avatar that rarely changes, but it means a
+    // re-upload at the *same* URL would keep serving the browser's old
+    // cached image until a hard reload. Changing the URL itself on every
+    // upload (rather than dropping the cache header) sidesteps that
+    // without sacrificing caching for the common case of an avatar that
+    // isn't currently changing.
+    avatarVersion: { type: Number, default: 0 },
     // "admin" is a limited-permission tier — see lib/permissions.js for the
     // full key catalog and lib/auth/guards.js's requirePermission() for how
     // it's enforced. "superadmin" is a fixed, singular, non-grantable status

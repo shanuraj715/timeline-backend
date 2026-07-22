@@ -688,7 +688,8 @@ authRouter.post(
     await storage.write(avatarKey, processed.avatarBuffer);
 
     user.avatarKey = avatarKey;
-    user.avatarUrl = `/api/auth/avatar/${user._id}`;
+    user.avatarVersion = (user.avatarVersion || 0) + 1;
+    user.avatarUrl = `/api/auth/avatar/${user._id}?v=${user.avatarVersion}`;
     await user.save();
 
     res.json({ user: user.toSafeJSON() });
